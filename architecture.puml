@@ -1,0 +1,120 @@
+@startuml UniFi_MultiView_Network
+skinparam defaultFontSize 12
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam ArrowColor #555555
+skinparam ArrowThickness 1.5
+
+skinparam rectangle {
+  BorderThickness 1.5
+  RoundCorner 10
+}
+
+skinparam package<<input>> {
+  BackgroundColor #F0FDF4
+  BorderColor #16A34A
+  FontColor #14532D
+}
+
+skinparam package<<intra>> {
+  BackgroundColor #EFF6FF
+  BorderColor #2563EB
+  FontColor #1E3A8A
+}
+
+skinparam package<<inter>> {
+  BackgroundColor #FAF5FF
+  BorderColor #7C3AED
+  FontColor #3B0764
+}
+
+skinparam package<<fusion>> {
+  BackgroundColor #FFF7ED
+  BorderColor #EA580C
+  FontColor #431407
+}
+
+title UniFi — Multi-view Deep Network (Hình 14)\nKích thước: V=6 views, K=30 sub-carrier, T=~1200, D=64, C=3
+
+' ─── INPUT ───
+package "Input (mỗi view i)" <<input>> as INPUT {
+  rectangle "X^i_t ∈ ℝ^(C×K×T)\ntime-domain (phase/amplitude)\nC=3 (RGB), K=30, T=~1200" as Xt
+  rectangle "X^i_f ∈ ℝ^(C×F×L)\nfreq-domain (DFS)\nC=3, F=freq bins, L=time bins" as Xf
+}
+
+' ─── INTRA-VIEW ───
+package "Intra-view Feature Extraction" <<intra>> as INTRA {
+  rectangle "f^ResNet_t (shared)\nResNet18 backbone\nΘ_t dùng chung V views\n→ F^i_t" as RESt
+
+  rectangle "f^ResNet_f (shared)\nResNet18 backbone\nΘ_f dùng chung V views\n→ F^i_f" as RESf
+
+  rectangle "Concat theo chiều kênh\nF^i_tf = [F^i_t, F^i_f]\n→ ℝ^(2D'×T)" as CONCAT
+
+  rectangle "Channel Attention (FC+Softmax)\ntrọng số α cho từng kênh\n→ ℝ^(2D'×T)" as CHANATT
+
+  rectangle "Conv1D\n→ F^i_intra ∈ ℝ^(D×T)\nD=64" as CONV1D
+}
+
+' ─── INTER-VIEW ───
+package "Inter-view Feature Interaction" <<inter>> as INTER {
+  rectangle "Stack V views\nF_intra = [F^1..F^V]\n→ ℝ^(T×V×D)" as STACK
+
+  rectangle "Temporal-aware Weighted Avg\nF̃^i,t = Σ_{j=−S}^S w_j·F^{i,t+j}\nw_j = 1/(1+|j|)²  (normalized)\n→ F̃_intra ∈ ℝ^(T×V×D)" as TAWA
+
+  rectangle "Spatial-aware View Mask\nchọn m candidate views\nrandom r target views\n→ Mask matrix M ∈ {0,1}^(V×V)" as MASK
+
+  rectangle "Masked Cross-view Attention\nQ = F_intra·W^q  ∈ ℝ^(T×V×d_k)\nK = F̃_intra·W^k ∈ ℝ^(T×V×d_k)\nV = F̃_intra·W^v ∈ ℝ^(T×V×d_v)\nH = Softmax(Mask(QK^T/√D))·V\n→ F_inter ∈ ℝ^(T×V×D)\nd_k=d_v=D/h=64/h" as MSTCVA
+
+  note right of MSTCVA
+    Attention tính TẠI TỪNG t
+    ma trận attn: V×V per timestep
+    không phải T×T
+    h = số heads (không báo cáo)
+  end note
+}
+
+' ─── FUSION ───
+package "Multi-view Feature Fusion" <<fusion>> as FUSION {
+  rectangle "Tách per-view\nF^i_inter ∈ ℝ^(T×D)\nmỗi view riêng biệt" as SPLIT
+
+  rectangle "Multi-scale Conv (per view)\nKernel sizes: p_k (không báo cáo)\nD filters mỗi kernel\n→ p^i_k ∈ ℝ^D per scale" as MSCNN
+
+  rectangle "Segment-level Fusion\nz^i = Σ_k α^filter_k · p^i_k\nα^filter = softmax(ReLU(FC(p^i)))\n→ z^i ∈ ℝ^D" as SEGFUS
+
+  rectangle "View-level Fusion\nα^view_i = softmax(ReLU(FC(z^i)))\nz_global = Σ_i α^view_i · z^i\n→ z_global ∈ ℝ^D" as VIEWFUS
+}
+
+' ─── OUTPUT ───
+rectangle "Classifier (FC + Softmax)\nŷ = f_cls(z_global)\nŷ^i = f_cls(z^i)  [shared]\n→ ℝ^|A|,  |A|=6 or 9" as CLS
+
+' ─── LOSSES ───
+rectangle "L = L_global + β₁·Σ L^i_view + β₂·L_pcon\nβ₁=1, β₂=0.05" as LOSS
+
+' ─── CONNECTIONS ───
+Xt --> RESt : X^i_t
+Xf --> RESf : X^i_f
+RESt --> CONCAT : F^i_t
+RESf --> CONCAT : F^i_f
+CONCAT --> CHANATT
+CHANATT --> CONV1D
+CONV1D --> STACK : F^i_intra\n∈ ℝ^(D×T)\n× V views
+
+STACK --> TAWA : F_intra\n∈ ℝ^(T×V×D)
+STACK --> MSTCVA : Q (dùng F gốc)
+TAWA --> MASK : F̃_intra
+MASK --> MSTCVA : K, V (dùng F̃ có mask)
+MSTCVA --> SPLIT : F_inter\n∈ ℝ^(T×V×D)
+
+SPLIT --> MSCNN : F^i_inter ∈ ℝ^(T×D)
+MSCNN --> SEGFUS : p^i_k ∈ ℝ^D
+SEGFUS --> VIEWFUS : z^i ∈ ℝ^D
+VIEWFUS --> CLS : z_global ∈ ℝ^D
+SEGFUS --> CLS : z^i ∈ ℝ^D\n(view-wise loss)
+CLS --> LOSS
+
+note bottom of LOSS
+  Trong inference: chỉ dùng z_global
+  View-wise loss chỉ dùng khi training
+end note
+
+@enduml

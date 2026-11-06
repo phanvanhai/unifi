@@ -1,0 +1,10 @@
+# UniFi — Python >= 3.9
+# Trên Kaggle torch/torchvision/numpy/scipy/matplotlib đã cài sẵn, không cần pip install.
+# Local có GPU: cài torch + torchvision theo hướng dẫn https://pytorch.org/get-started/locally/
+#               (chọn đúng bản CUDA) trước, rồi mới `pip install -r requirements.txt`.
+
+torch>=2.0
+torchvision>=0.15     # cần API resnet18(weights=...)
+numpy>=1.23
+scipy>=1.9            # scipy.signal: stft, butter, sosfilt
+matplotlib>=3.6       # ax.bar_label, vẽ hình
