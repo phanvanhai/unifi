@@ -196,6 +196,70 @@ def ram_str():
     return (' | ' + ' '.join(parts)) if parts else ''
 
 
+def _rss_gb(pid):
+    try:
+        with open(f'/proc/{pid}/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / 2**20
+    except OSError:
+        pass
+    return 0.0
+
+
+def _children(pid):
+    try:
+        with open(f'/proc/{pid}/task/{pid}/children') as f:
+            return [int(x) for x in f.read().split()]
+    except OSError:
+        return []
+
+
+def ram_detail_str():
+    """Chi tiết RAM để tìm leak: anon/file của cgroup, RSS tiến trình chính và các worker."""
+    parts = []
+    stat = {}
+    for p in ('/sys/fs/cgroup/memory.stat', '/sys/fs/cgroup/memory/memory.stat'):
+        try:
+            with open(p) as f:
+                for line in f:
+                    k, v = line.split()[:2]
+                    stat[k] = int(v)
+            break
+        except (OSError, ValueError):
+            continue
+    anon = stat.get('anon', stat.get('total_rss'))
+    file = stat.get('file', stat.get('total_cache'))
+    if anon is not None:
+        parts.append(f"anon {anon / 2**30:.1f}G")
+    if file is not None:
+        parts.append(f"file {file / 2**30:.1f}G")
+    if 'shmem' in stat:
+        parts.append(f"shmem {stat['shmem'] / 2**30:.1f}G")
+    me = os.getpid()
+    if os.path.exists(f'/proc/{me}/status'):
+        kids = _children(me)
+        parts.append(f"main {_rss_gb(me):.2f}G")
+        if kids:
+            parts.append(f"workers {sum(_rss_gb(k) for k in kids):.2f}G/{len(kids)}")
+    return ' '.join(parts)
+
+
+def release_host_memory():
+    """Trả RAM rảnh về OS cuối mỗi epoch (phân mảnh malloc + cache pinned memory)."""
+    import gc
+    gc.collect()
+    try:
+        torch._C._host_emptyCache()       # cache pinned memory (CachingHostAllocator)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.CDLL('libc.so.6').malloc_trim(0)
+    except Exception:
+        pass
+
+
 def gpu_mem_str(device):
     if not str(device).startswith('cuda') or not torch.cuda.is_available():
         return ram_str()
@@ -589,6 +653,10 @@ def train(model, train_loader, test_loader,
                      + ' '.join(f"{n}={a:.3f}" for n, a in zip(names, c_acc)))
             if tr['nonfinite']:
                 log.warning(f"          {tr['nonfinite']} batch có loss NaN/Inf đã bị bỏ qua")
+            release_host_memory()
+            detail = ram_detail_str()
+            if detail:
+                log.info(f"          ram chi tiết: {detail}{ram_str()}")
 
             if writer is not None:
                 writer.writerow({
