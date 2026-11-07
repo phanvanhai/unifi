@@ -18,6 +18,7 @@ import csv
 import json
 import logging
 import math
+import os
 import time
 from pathlib import Path
 
@@ -161,15 +162,49 @@ def make_grad_scaler(enabled):
         return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
+def _read_first_int(paths):
+    for p in paths:
+        try:
+            with open(p) as f:
+                v = f.read().split()[0]
+            if v.isdigit():
+                return int(v)
+        except (OSError, IndexError):
+            pass
+    return None
+
+
+def ram_str():
+    """RAM của container (cgroup, cùng số Kaggle dùng để kill) + /dev/shm (batch đang chờ)."""
+    used  = _read_first_int(['/sys/fs/cgroup/memory.current',
+                             '/sys/fs/cgroup/memory/memory.usage_in_bytes'])
+    limit = _read_first_int(['/sys/fs/cgroup/memory.max',
+                             '/sys/fs/cgroup/memory/memory.limit_in_bytes'])
+    parts = []
+    if used is not None:
+        s = f"ram {used / 2**30:.1f}"
+        if limit and limit < 2**50:
+            s += f"/{limit / 2**30:.0f}G"
+        else:
+            s += "G"
+        parts.append(s)
+    try:
+        st = os.statvfs('/dev/shm')
+        parts.append(f"shm {(st.f_blocks - st.f_bfree) * st.f_frsize / 2**30:.1f}G")
+    except (OSError, AttributeError):
+        pass
+    return (' | ' + ' '.join(parts)) if parts else ''
+
+
 def gpu_mem_str(device):
     if not str(device).startswith('cuda') or not torch.cuda.is_available():
-        return ''
+        return ram_str()
     parts = []
     for d in range(torch.cuda.device_count()):
         alloc = torch.cuda.max_memory_allocated(d) / 2**30
         total = torch.cuda.get_device_properties(d).total_memory / 2**30
         parts.append(f"gpu{d} {alloc:.1f}/{total:.0f}G")
-    return ' | ' + ' '.join(parts)
+    return ' | ' + ' '.join(parts) + ram_str()
 
 
 def fmt_time(s):
@@ -211,8 +246,9 @@ def train_one_epoch(model, dataloader, optimizer,
         t_data += t_ready - t_last
 
         # X_f, X_t: [B, V, 3, H, W] | labels: [B]
-        X_f    = X_f.to(device, non_blocking=True)
-        X_t    = X_t.to(device, non_blocking=True)
+        # dataset trả fp16 (đỡ RAM/shm) → về fp32 trên GPU
+        X_f    = X_f.to(device, non_blocking=True).float()
+        X_t    = X_t.to(device, non_blocking=True).float()
         labels = labels.to(device, non_blocking=True)
 
         # ── Forward (AMP: fp16 cho ResNet, loss tính fp32) ────────────
@@ -299,8 +335,8 @@ def evaluate(model, dataloader, device,
 
     with torch.no_grad():
         for X_f, X_t, labels in dataloader:
-            X_f    = X_f.to(device, non_blocking=True)
-            X_t    = X_t.to(device, non_blocking=True)
+            X_f    = X_f.to(device, non_blocking=True).float()
+            X_t    = X_t.to(device, non_blocking=True).float()
             labels = labels.to(device, non_blocking=True)
 
             with autocast(amp):
@@ -546,7 +582,7 @@ def train(model, train_loader, test_loader,
                 f"Test loss {res.get('loss', float('nan')):.4f} acc {res['acc']:.4f} "
                 f"F1 {f1:.4f} | {fmt_time(dt)} (train {fmt_time(t_train)}, "
                 f"chờ data {fmt_time(tr['time_data_s'])}) | đã chạy {fmt_time(elapsed)}, "
-                f"còn ~{fmt_time(eta)}" + ("  *best" if is_best else ""))
+                f"còn ~{fmt_time(eta)}{ram_str()}" + ("  *best" if is_best else ""))
             log.info("          test acc theo view: "
                      + ' '.join(f"r{v + 1}={a:.3f}" for v, a in enumerate(v_acc))
                      + f" | theo lớp: "

@@ -88,7 +88,19 @@ Ví dụ `ARGS` khác:
 
 ### Tốc độ trên Kaggle
 
-- **Cache tiền xử lý** (bật mặc định): lần đầu chạy, code đọc `.dat` và tính STFT cho mọi mẫu rồi lưu vào `/tmp/unifi_cache`. Với ~6700 mẫu, cache chiếm khoảng 6–7 GB và mất khoảng 10–20 phút. Các epoch sau chỉ còn colormap và resize. Nếu không có cache, riêng phần đọc dữ liệu đã tốn khoảng 8 phút/epoch, nên 100 epoch sẽ vượt giới hạn 12 giờ. Muốn giữ cache giữa các lần commit thì đặt `--cache-dir /kaggle/working/cache` (cache sẽ nằm trong Output).
+- **Cache tiền xử lý** (bật mặc định): code đọc `.dat` và tính HPF + PCA + STFT cho mọi mẫu một lần, lưu vào `/tmp/unifi_cache`. Với ~6700 mẫu (9 user), cache chiếm **5.7 GB** và mất **~170 phút** trên 4 CPU của Kaggle. Các epoch sau chỉ còn colormap và resize. `/tmp` bị xoá sau mỗi phiên, nên hãy build cache **một lần** thành Kaggle Dataset (xem bên dưới).
+
+### Build cache một lần thành Kaggle Dataset (khuyên dùng)
+
+1. Ở ô *Cấu hình* của notebook, đặt `ARGS = CACHE_ARGS`, tức là:
+   ```
+   --cache-only --cache-dir /kaggle/working/unifi_cache --no-zip
+   ```
+   Thêm `--users ...` / `--gestures ...` nếu muốn cache khác mặc định. Tắt GPU cũng được (chỉ dùng CPU). **Save Version → Save & Run All**, chạy ~3 giờ. Output khoảng 6 GB (giới hạn `/kaggle/working` là 20 GB).
+2. Khi version chạy xong: mở version → tab **Output** → **New Dataset**, đặt tên ví dụ `unifi-cache`, chế độ Private.
+3. Notebook train: **Add Input** → dataset `unifi-cache`, trả `ARGS` về lệnh train. `main.py` tự tìm trong `/kaggle/input` (`--cache-search`) một cache có cùng tham số tiền xử lý và chứa đủ các mẫu cần dùng, log in `[cache] Dùng cache có sẵn ...`. Dữ liệu trong `/kaggle/input` không tính vào 20 GB output.
+
+Cache build từ 9 user dùng được cho mọi cách chia (`random`, `user`, `location`, `orientation`) và cho tập con user/gesture. Đổi tham số tiền xử lý (`--no-highpass`, ...) hoặc thêm user ngoài cache thì code tự build lại vào `/tmp`.
 - **AMP** (fp16) và **DataParallel** trên 2 GPU được bật tự động. Tắt bằng `--no-amp` hoặc `--single-gpu`.
 - **Giới hạn thời gian**: trên Kaggle mặc định `--time-limit-hours 11.5`. Nếu epoch kế tiếp có thể vượt mốc này, code dừng sớm nhưng vẫn ghi đủ checkpoint, CSV, `summary.json`, hình và file zip.
 
@@ -97,7 +109,7 @@ Ví dụ `ARGS` khác:
 Mọi thứ in ra màn hình đều được ghi vào `runs/<run>/train.log`, kèm timestamp:
 - thông tin môi trường (GPU, VRAM, CUDA, RAM, git commit), toàn bộ cấu hình, phân bố train/test theo lớp, user, location và orientation, spatial mask, số tham số của từng module;
 - tiến độ build cache: số mẫu/giây, dung lượng, thời gian còn lại;
-- mỗi `--log-interval` batch: các thành phần loss, accuracy, số mẫu/giây, % thời gian chờ dữ liệu, thời gian còn lại của epoch, VRAM;
+- mỗi `--log-interval` batch: các thành phần loss, accuracy, số mẫu/giây, % thời gian chờ dữ liệu, thời gian còn lại của epoch, VRAM, RAM của container và `/dev/shm`;
 - mỗi epoch: loss và accuracy của train/test, macro-F1, accuracy theo từng view và từng lớp, thời gian, ETA;
 - cuối run: best/last accuracy và confusion matrix; nếu có lỗi thì ghi cả traceback.
 
@@ -127,6 +139,8 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--no-mask`, `--no-highpass` | | Tắt spatial mask / tắt lọc thông cao 2 Hz trước DFS |
 | `--workers` | `NUM_WORKERS` | Số tiến trình đọc dữ liệu (mặc định ≤ 4) |
 | `--no-amp`, `--single-gpu`, `--no-cache`, `--cache-dir` | | Tốc độ, xem mục 3 |
+| `--cache-only` | `CACHE_ONLY` | Chỉ build cache rồi thoát (để tạo Kaggle Dataset) |
+| `--cache-search` | `CACHE_SEARCH` | Thư mục tìm cache build sẵn, chỉ đọc (Kaggle: `/kaggle/input`) |
 | `--time-limit-hours` | `TIME_LIMIT_H` | Dừng sớm và vẫn ghi kết quả (Kaggle: 11.5, `0` = không giới hạn) |
 | `--max-samples` | `MAX_SAMPLES` | Chỉ lấy N mẫu, chia đều theo lớp, để chạy thử |
 | `--run-name`, `--log-interval`, `--no-plots`, `--zip/--no-zip` | | Tên run, tần suất log, vẽ hình, nén run |
@@ -195,7 +209,7 @@ python plot_samples.py   # (tuỳ chọn) xem ảnh DFS/pha của vài mẫu →
 | `git clone` lỗi trên Kaggle | Chưa bật *Internet On*, hoặc repo private mà chưa có secret `GITHUB_TOKEN` |
 | Run bị dừng với `stop_reason: time_limit` | Hết `--time-limit-hours`: giảm `--epochs`, hoặc tách thí nghiệm ra nhiều notebook |
 | `CUDA out of memory` | `--batch-size 16` |
-| `DataLoader worker … killed` / thiếu RAM | `--workers 2` (hoặc 0) |
+| `DataLoader worker … killed` / `Your notebook tried to allocate more memory than is available` | Xem cột `ram …/31G shm …G` trong log; giảm `--workers 2` (hoặc 0) |
 | `Device: cpu` trên Kaggle | Chưa bật GPU trong *Settings → Accelerator* |
 
 ---

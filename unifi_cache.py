@@ -24,6 +24,7 @@ Cấu trúc thư mục cache (<cache_dir>/<key>/):
 import hashlib
 import json
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -72,8 +73,41 @@ def _identity(x):
     return x
 
 
+def _same_prep(a, b):
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def find_cache(sample_ids, prep, search_dirs, max_depth=4):
+    """
+    Tìm cache đã build xong trong `search_dirs` (vd. Kaggle Dataset gắn ở
+    /kaggle/input) có cùng tham số tiền xử lý và chứa ĐỦ các mẫu cần dùng
+    (được phép nhiều hơn → train trên tập con user/split vẫn dùng chung).
+    Trả về thư mục cache hoặc None.
+    """
+    need = set(sample_ids)
+    for d in search_dirs:
+        d = Path(d)
+        if not d.is_dir():
+            continue
+        for depth in range(0, max_depth + 1):
+            for meta_p in d.glob('/'.join(['*'] * depth + ['meta.json'])):
+                root = meta_p.parent
+                if not ((root / 'DONE').exists() and (root / 'data.bin').exists()
+                        and (root / 'index.npy').exists()):
+                    continue
+                try:
+                    meta = json.loads(meta_p.read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    continue
+                if meta.get('version') != CACHE_VERSION or not _same_prep(meta.get('prep'), prep):
+                    continue
+                if need.issubset(meta.get('ids', ())):
+                    return root
+    return None
+
+
 def build_or_load_cache(samples, sample_ids, load_view, prep, cache_dir,
-                        num_workers=4, log_every=200):
+                        num_workers=4, log_every=200, search_dirs=()):
     """
     Trả về đường dẫn thư mục cache (đã build xong) cho danh sách `samples`.
 
@@ -88,6 +122,13 @@ def build_or_load_cache(samples, sample_ids, load_view, prep, cache_dir,
         size = (root / 'data.bin').stat().st_size / 2**30
         log.info(f"[cache] Dùng lại cache có sẵn: {root} ({size:.2f} GB, {len(samples)} mẫu)")
         return root
+
+    found = find_cache(sample_ids, prep, [cache_dir, *search_dirs])
+    if found is not None:
+        size = (found / 'data.bin').stat().st_size / 2**30
+        log.info(f"[cache] Dùng cache có sẵn (chứa đủ {len(samples)} mẫu cần): {found} ({size:.2f} GB)")
+        return found
+    log.info(f"[cache] Không thấy cache phù hợp trong {[str(cache_dir), *map(str, search_dirs)]}")
 
     if root.exists():
         log.warning(f"[cache] Cache dở dang ở {root} → xoá và build lại")
@@ -155,17 +196,22 @@ class CachedWiDarDataset(Dataset):
         self.bin_path = str(cache_root / 'data.bin')
         self.colormap = colormap
         self.img_size = img_size
-        self._mm      = None   # mở lười trong từng worker (memmap không pickle được tốt)
+        self._f       = None   # mở lười trong từng worker (file handle không pickle được)
 
     def __len__(self):
         return len(self.rows)
 
     def _map(self, off, h, w):
-        return self._mm[off:off + h * w].reshape(h, w).astype(np.float32) / Q
+        # Đọc bằng pread thay vì memmap: memmap giữ trang đã đọc trong RSS của
+        # từng worker (persistent) → sau nhiều epoch mỗi worker "giữ" gần cả
+        # file cache (~6 GB) → container Kaggle hết RAM ở cuối run.
+        n   = int(h) * int(w)
+        buf = os.pread(self._f.fileno(), n * 2, int(off) * 2) if hasattr(os, 'pread')             else (self._f.seek(int(off) * 2), self._f.read(n * 2))[1]
+        return np.frombuffer(buf, dtype=np.uint16).reshape(h, w).astype(np.float32) / Q
 
     def __getitem__(self, idx):
-        if self._mm is None:
-            self._mm = np.memmap(self.bin_path, dtype=np.uint16, mode='r')
+        if self._f is None:
+            self._f = open(self.bin_path, 'rb', buffering=0)
         X_f_list, X_t_list = [], []
         for v_idx in self.index[self.rows[idx]]:       # [2, 3]
             dfs01 = self._map(*v_idx[0])
@@ -173,5 +219,7 @@ class CachedWiDarDataset(Dataset):
             X_f, X_t = maps_to_tensors(dfs01, pha01, self.colormap, self.img_size)
             X_f_list.append(X_f)
             X_t_list.append(X_t)
-        return (torch.stack(X_f_list), torch.stack(X_t_list),
+        # fp16: giảm 1/2 RAM cho shared memory + pinned memory của DataLoader
+        # (sai số ≤ 2.4e-4 trên [0, 1]; train/evaluate đổi lại .float() trên GPU)
+        return (torch.stack(X_f_list).half(), torch.stack(X_t_list).half(),
                 torch.tensor(self.labels[idx], dtype=torch.long))

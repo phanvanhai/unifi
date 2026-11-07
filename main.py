@@ -170,6 +170,9 @@ AMP          = True       # mixed precision fp16 trên GPU (nhanh ~2×, ít VRAM
 MULTI_GPU    = True       # DataParallel khi có > 1 GPU (Kaggle T4 x2)
 USE_CACHE    = True       # cache bản đồ DFS/pha (xem unifi_cache.py)
 CACHE_DIR    = Path('/tmp/unifi_cache') if IS_KAGGLE else CODE_DIR / 'cache'
+# Nơi tìm cache build sẵn (vd. Kaggle Dataset tạo từ output của --cache-only)
+CACHE_SEARCH = [Path('/kaggle/input')] if IS_KAGGLE else []
+CACHE_ONLY   = False      # chỉ build cache rồi thoát (không train)
 MAX_SAMPLES  = None       # giới hạn số mẫu (chạy thử nhanh), None = tất cả
 TIME_LIMIT_H = 11.5 if IS_KAGGLE else None   # Kaggle cắt phiên ở 12 giờ
 LOG_INTERVAL = 20         # in tiến độ mỗi N batch (0 = tắt)
@@ -400,6 +403,8 @@ def _worker_init(worker_id):
     seed = torch.initial_seed() % 2**32
     np.random.seed(seed)
     random.seed(seed)
+    # 1 luồng/worker: tránh 4 worker x 4 luồng tranh 4 CPU + bớt malloc arena (phân mảnh RAM)
+    torch.set_num_threads(1)
 
 
 def make_loader(samples, shuffle, device, cache_root=None):
@@ -416,8 +421,10 @@ def make_loader(samples, shuffle, device, cache_root=None):
         drop_last=shuffle and len(ds) > BATCH_SIZE,   # train: bỏ batch lẻ cuối (BN + contrastive)
         num_workers=NUM_WORKERS,
         pin_memory=(device == 'cuda'),
-        persistent_workers=NUM_WORKERS > 0,
-        prefetch_factor=4 if NUM_WORKERS > 0 else None,
+        # Chỉ giữ worker của train; worker test tạo lại mỗi lần evaluate
+        # (vài giây) để không chiếm RAM suốt lúc train
+        persistent_workers=shuffle and NUM_WORKERS > 0,
+        prefetch_factor=2 if NUM_WORKERS > 0 else None,
         worker_init_fn=_worker_init,
     )
 
@@ -533,6 +540,7 @@ def config_dict():
         'multi_gpu'   : MULTI_GPU,
         'use_cache'   : USE_CACHE,
         'cache_dir'   : str(CACHE_DIR),
+        'cache_search': [str(d) for d in CACHE_SEARCH],
         'num_workers' : NUM_WORKERS,
         'max_samples' : MAX_SAMPLES,
         'time_limit_h': TIME_LIMIT_H,
@@ -624,7 +632,11 @@ def main():
             used = sorted(train_s + test_s, key=lambda s: s['id'])
             cache_root = build_or_load_cache(
                 used, [s['id'] for s in used], load_view, prep_params(), CACHE_DIR,
-                num_workers=NUM_WORKERS)
+                num_workers=NUM_WORKERS, search_dirs=CACHE_SEARCH)
+            if CACHE_ONLY:
+                log.info(f"--cache-only: xong, cache ở {cache_root} — tạo Kaggle Dataset từ "
+                         f"thư mục này rồi Add Input cho notebook train")
+                return None
         else:
             log.info("Không dùng cache: đọc .dat + STFT mỗi epoch (chậm)")
 
@@ -730,7 +742,11 @@ def parse_args(argv=None):
     g.add_argument('--no-amp', action='store_true', help='tắt mixed precision')
     g.add_argument('--single-gpu', action='store_true', help='không dùng DataParallel')
     g.add_argument('--no-cache', action='store_true', help='không cache tiền xử lý')
-    g.add_argument('--cache-dir', default=str(CACHE_DIR))
+    g.add_argument('--cache-dir', default=str(CACHE_DIR), help='nơi ghi cache (build mới)')
+    g.add_argument('--cache-search', nargs='*', default=[str(d) for d in CACHE_SEARCH],
+                   help='thư mục tìm cache build sẵn (chỉ đọc), vd. /kaggle/input')
+    g.add_argument('--cache-only', action='store_true',
+                   help='chỉ build cache rồi thoát; dùng với --cache-dir /kaggle/working/unifi_cache')
     g.add_argument('--time-limit-hours', type=float, default=TIME_LIMIT_H,
                    help='dừng sớm (vẫn ghi kết quả) trước giới hạn này; 0 = không giới hạn')
     g.add_argument('--log-interval', type=int, default=LOG_INTERVAL)
@@ -746,7 +762,7 @@ def apply_args(a):
     global DATA_ROOT, OUTPUT_DIR, RUN_NAME, USERS, GESTURES, MAX_SAMPLES, SPLIT_BY, TEST_VALUES
     global TEST_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
     global RX_DIRECTIONS, DFS_HIGHPASS, NUM_WORKERS, AMP, MULTI_GPU, USE_CACHE, CACHE_DIR
-    global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN
+    global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY
     DATA_ROOT    = Path(a.data_root)
     OUTPUT_DIR   = Path(a.output_dir)
     RUN_NAME     = a.run_name
@@ -772,6 +788,10 @@ def apply_args(a):
     MULTI_GPU    = not a.single_gpu
     USE_CACHE    = not a.no_cache
     CACHE_DIR    = Path(a.cache_dir)
+    CACHE_SEARCH = [Path(d) for d in a.cache_search]
+    CACHE_ONLY   = a.cache_only
+    if CACHE_ONLY and not USE_CACHE:
+        raise SystemExit('--cache-only không đi cùng --no-cache')
     TIME_LIMIT_H = a.time_limit_hours or None
     LOG_INTERVAL = a.log_interval
     MAKE_PLOTS   = not a.no_plots
