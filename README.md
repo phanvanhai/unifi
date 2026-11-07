@@ -1,6 +1,6 @@
-# UniFi — Nhận dạng cử chỉ Wi-Fi đa góc nhìn (Widar 3.0)
+# UniFi — Nhận dạng cử chỉ Wi-Fi đa góc nhìn (Widar 3.0, SSHAR ESP)
 
-Cài đặt lại mô hình **UniFi** (Liu et al., Proc. ACM IMWUT 2023) bằng PyTorch, huấn luyện trên dữ liệu CSI của Widar 3.0 (1 Tx, 6 Rx = 6 view).
+Cài đặt lại mô hình **UniFi** (Liu et al., Proc. ACM IMWUT 2023) bằng PyTorch, huấn luyện trên dữ liệu CSI của Widar 3.0 (1 Tx, 6 Rx = 6 view) và SSHAR ESP (3 receiver ESP32 = 3 view, theo [SSHAR_ESP_protocol.md](SSHAR_ESP_protocol.md), xem mục 2b).
 
 Tài liệu này hướng dẫn chạy trên **Kaggle Notebook** (GPU). Ở cuối có phần chạy trên máy cá nhân.
 
@@ -37,6 +37,38 @@ ví dụ: widar/user5/user5-1-1-1-1-r1.dat
 - 1 mẫu = 6 file `r1`…`r6`, mỗi file ứng với một bộ thu (view).
 - Thư mục user có thể nằm sâu hơn một cấp, ví dụ `widar/20181130_user15_16_17/user15/`. Code vẫn tự tìm thấy.
 - Code tự bỏ qua mẫu thiếu bộ thu hoặc có file quá ngắn (< 256 packet) và in danh sách các mẫu bị bỏ.
+
+## 2b. SSHAR ESP (`--dataset sshar`)
+
+Theo đúng [SSHAR_ESP_protocol.md](SSHAR_ESP_protocol.md): 3 receiver `rx_00..02` (mỗi receiver là 1 view), 8 hành động, 10 người, chia 7:1:2 theo lần lặp (`sshar_split_of`), số mẫu bắt buộc **4480 / 640 / 1280** (code dừng nếu lệch), chọn checkpoint theo **val accuracy**, báo cáo accuracy + precision / recall / F1 macro.
+
+```
+sshar_amp_interp/room_02/esp/rx_00/subject_01/amp_act01_pos01_dir00_rep01.npy   # (1, 56, 1000)
+```
+
+Code tự tìm `sshar_amp_interp` trong `/kaggle/input`, ở `../../CodeForPaper/benchmark/data/` khi chạy local, hoặc theo `--data-root` / biến môi trường `UNIFI_SSHAR_ROOT`.
+
+**Điều chỉnh UniFi cho ESP32** (khác bài gốc; ghi vào báo cáo của mô hình):
+
+| | Widar 3.0 (bài gốc) | SSHAR ESP |
+|---|---|---|
+| Tín hiệu | CSI phức, CSI ratio 2 anten | chỉ biên độ, 1 anten |
+| Ảnh nhánh tần số | DFS từ CSI ratio, ±60 Hz (121 bin) | DFS từ biên độ (trừ mean → HPF 2 Hz → PCA → STFT), 0..60 Hz (61 bin) vì tín hiệu thực không phân biệt dấu Doppler |
+| Ảnh nhánh thời gian | pha ∠CSI ratio [30, T] | biên độ [56, 1000] (không có pha) |
+| STFT | 1000 Hz, cửa sổ 256, hop 8 | 200 Hz, cửa sổ 64 (0.32 s), hop 4, nfft 200 → [61, 235] |
+| Spatial mask | theo toạ độ 6 Rx | không dùng (chưa có toạ độ receiver) |
+| Chọn checkpoint | test acc | val acc |
+
+Siêu tham số giữ theo bài UniFi: batch 32, 100 epoch, Adam, lr 0.005, β1 = 1.0, β2 = 0.05, không scheduler / early stopping / augmentation. Ảnh min-max trên từng mẫu (như bài), không dùng thống kê toàn tập.
+
+Hai giai đoạn của protocol:
+
+```bash
+python main.py --dataset sshar                 # Development: train, chọn + báo cáo trên val, không đụng test
+python main.py --dataset sshar --final-test    # Final (1 lần, bước cuối): thêm đánh giá checkpoint tốt nhất trên val và test
+```
+
+Kết quả nằm ở `summary.json`: `best_val` (accuracy, macro P/R/F1 tại epoch tốt nhất) và với `--final-test` thêm `final.val`, `final.test`; dự đoán từng mẫu ở `val_predictions_best.csv`, `test_predictions_final.csv`. Cache tiền xử lý SSHAR nhỏ (~2.7 GB) và build nhanh nên không cần tạo Kaggle Dataset cho cache.
 
 ---
 
@@ -130,10 +162,12 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 
 | Tham số | Biến | Ý nghĩa |
 |---|---|---|
-| `--data-root` | `DATA_ROOT` | Thư mục chứa `userX/*.dat` (có thể lồng sâu hơn) |
+| `--dataset` | `DATASET` | `widar` (mặc định) hoặc `sshar` (mục 2b) |
+| `--data-root` | `DATA_ROOT` | Thư mục chứa `userX/*.dat` (Widar) hoặc `room_XX/` (SSHAR); mặc định tự tìm |
+| `--final-test` | `FINAL_TEST` | SSHAR: đánh giá checkpoint tốt nhất (theo val) trên test, chỉ ở bước cuối |
 | `--output-dir` | `OUTPUT_DIR` | Nơi tạo `runs/` (Kaggle: `/kaggle/working`) |
 | `--users`, `--gestures` | `USERS`, `GESTURES` | User và gesture id được dùng (nhãn = vị trí trong list) |
-| `--split`, `--test-values`, `--test-ratio` | `SPLIT_BY`, `TEST_VALUES`, `TEST_RATIO` | `random` (in-domain, 20% test) / `user` / `location` / `orientation` |
+| `--split`, `--test-values`, `--test-ratio` | `SPLIT_BY`, `TEST_VALUES`, `TEST_RATIO` | Widar: `random` (in-domain, 20% test) / `user` / `location` / `orientation`; SSHAR: `protocol` |
 | `--epochs`, `--batch-size`, `--lr`, `--beta1`, `--beta2` | | Theo bài báo: 100*, 32, 0.005, 1.0, 0.05 (*bài không nêu số epoch) |
 | `--weight-decay`, `--grad-clip` | | Không có trong bài, mặc định tắt |
 | `--no-mask`, `--no-highpass` | | Tắt spatial mask / tắt lọc thông cao 2 Hz trước DFS |
@@ -145,7 +179,7 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--max-samples` | `MAX_SAMPLES` | Chỉ lấy N mẫu, chia đều theo lớp, để chạy thử |
 | `--run-name`, `--log-interval`, `--no-plots`, `--zip/--no-zip` | | Tên run, tần suất log, vẽ hình, nén run |
 
-**Chia dữ liệu:** chỉ có train và test, như bài UniFi và WiGRUNT. Checkpoint được chọn theo **test accuracy cao nhất**, nên con số này hơi lạc quan. Kết quả của epoch cuối (`*_last`) vẫn được lưu song song để báo cáo.
+**Chia dữ liệu (Widar):** chỉ có train và test, như bài UniFi và WiGRUNT. Checkpoint được chọn theo **test accuracy cao nhất**, nên con số này hơi lạc quan. Kết quả của epoch cuối (`*_last`) vẫn được lưu song song để báo cáo.
 
 Biến môi trường (không bắt buộc): `UNIFI_DATA_ROOT`, `UNIFI_OUTPUT_DIR`.
 

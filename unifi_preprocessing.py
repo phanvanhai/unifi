@@ -255,16 +255,50 @@ def normalize01(data_2d):
     return ((data_2d - d_min) / (d_max - d_min)).astype(np.float32)
 
 
+def extract_dfs_amp(A, fs=200, nperseg=64, noverlap=60, nfft=200, f_max=60,
+                    highpass=False, hp_cutoff=2, hp_order=3):
+    """
+    Phổ Doppler từ BIÊN ĐỘ CSI (thiết bị chỉ có |H|, 1 anten → không có CSI ratio).
+
+    Giống extract_dfs (trừ mean → HPF → PCA → STFT) nhưng tín hiệu thực:
+    dao động biên độ chỉ cho |f_D| (không phân biệt lại gần / ra xa) → phổ
+    đối xứng, chỉ giữ nửa dương 0..f_max (cách làm của CARM).
+
+    A : ndarray float [K, T] → F_DFS [f_max * nfft / fs + 1, L]
+    """
+    A_d = A - A.mean(axis=1, keepdims=True)
+    if highpass:
+        sos = butter(hp_order, hp_cutoff, btype='high', fs=fs, output='sos')
+        A_d = sosfilt(sos, A_d, axis=1)
+    X = A_d.T                                       # [T, K]
+    _, _, Vh = np.linalg.svd(X, full_matrices=False)
+    signal = X @ Vh[0]                              # [T] thực
+    f, _, Zxx = stft(signal, fs=fs, window='hann', nperseg=nperseg, noverlap=noverlap,
+                     nfft=nfft, return_onesided=True, boundary=None, padded=False)
+    return np.abs(Zxx[f <= f_max])                  # [F, L]
+
+
 def compute_maps(H_r, fs=1000, nperseg=256, noverlap=248,
-                 nfft=1000, f_max=60, highpass=False):
+                 nfft=1000, f_max=60, highpass=False, signal='csi_ratio'):
     """
     Phần tốn CPU của preprocessing (HPF + PCA + STFT), không phụ thuộc colormap.
     Kết quả đã min-max về [0, 1] → có thể cache (xem unifi_cache.py).
 
+    signal = 'csi_ratio' (Widar, H_r complex [K, T]): ảnh DFS + ảnh pha ∠H_r
+    signal = 'amp'       (SSHAR ESP, H_r = |H| float [K, T]): ảnh DFS từ biên độ
+                         + ảnh biên độ [K, T] thay cho ảnh pha (không có pha)
+
     Trả về:
         dfs01 : float32 [F, L] trong [0, 1]
-        pha01 : float32 [K, T] trong [0, 1]
+        pha01 : float32 [K, T] trong [0, 1]   (ảnh pha hoặc ảnh biên độ)
     """
+    if signal == 'amp':
+        A = np.asarray(H_r, dtype=np.float64)
+        F_DFS = extract_dfs_amp(A, fs=fs, nperseg=nperseg, noverlap=noverlap,
+                                nfft=nfft, f_max=f_max, highpass=highpass)
+        return normalize01(F_DFS), normalize01(A)
+    if signal != 'csi_ratio':
+        raise ValueError(f"signal không hợp lệ: {signal!r}")
     F_DFS = extract_dfs(H_r, fs=fs, nperseg=nperseg, noverlap=noverlap,
                         nfft=nfft, f_max=f_max, highpass=highpass)   # [F, L]
     T_pha = extract_phase(H_r)                                       # [K, T]
@@ -375,7 +409,7 @@ class WiDarDataset(Dataset):
     def __init__(self, data_list, label_list,
                  fs=1000, nperseg=256, noverlap=248,
                  nfft=1000, f_max=60, colormap='parula',
-                 img_size=(224, 224), highpass=False):
+                 img_size=(224, 224), highpass=False, signal='csi_ratio'):
         """
         Tham số:
             data_list  : list N phần tử
@@ -397,6 +431,7 @@ class WiDarDataset(Dataset):
         self.f_max    = f_max
         self.colormap = colormap
         self.highpass = highpass
+        self.signal   = signal
 
     def __len__(self):
         return len(self.data_list)
@@ -421,7 +456,8 @@ class WiDarDataset(Dataset):
                 noverlap=self.noverlap,
                 nfft=self.nfft,
                 f_max=self.f_max,
-                highpass=self.highpass
+                highpass=self.highpass,
+                signal=self.signal
             )
             X_f, X_t = maps_to_tensors(dfs01, pha01, self.colormap, self.img_size)
             # X_f, X_t: [3, H, W]
