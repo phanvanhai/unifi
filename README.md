@@ -101,7 +101,8 @@ Ví dụ `ARGS` khác:
 3. Notebook train: **Add Input** → dataset `unifi-cache`, trả `ARGS` về lệnh train. `main.py` tự tìm trong `/kaggle/input` (`--cache-search`) một cache có cùng tham số tiền xử lý và chứa đủ các mẫu cần dùng, log in `[cache] Dùng cache có sẵn ...`. Dữ liệu trong `/kaggle/input` không tính vào 20 GB output.
 
 Cache build từ 9 user dùng được cho mọi cách chia (`random`, `user`, `location`, `orientation`) và cho tập con user/gesture. Đổi tham số tiền xử lý (`--no-highpass`, ...) hoặc thêm user ngoài cache thì code tự build lại vào `/tmp`.
-- **AMP** (fp16) và **DataParallel** trên 2 GPU được bật tự động. Tắt bằng `--no-amp` hoặc `--single-gpu`.
+- **AMP** (fp16) bật tự động, tắt bằng `--no-amp`.
+- **1 GPU** là mặc định, kể cả khi chọn T4 x2. `--multi-gpu` bật DataParallel nhưng không nên dùng: đo trên Kaggle, DataParallel làm RAM tăng ~0.2 GB/epoch (100 epoch ≈ 20 GB, đủ để notebook bị kill) và còn chậm hơn (31 so với 50 mẫu/s, 3m25s so với 2m08s/epoch). Trên Kaggle chọn **GPU T4 x2** hay **P100** đều được.
 - **Giới hạn thời gian**: trên Kaggle mặc định `--time-limit-hours 11.5`. Nếu epoch kế tiếp có thể vượt mốc này, code dừng sớm nhưng vẫn ghi đủ checkpoint, CSV, `summary.json`, hình và file zip.
 
 ### Log
@@ -138,7 +139,7 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--weight-decay`, `--grad-clip` | | Không có trong bài, mặc định tắt |
 | `--no-mask`, `--no-highpass` | | Tắt spatial mask / tắt lọc thông cao 2 Hz trước DFS |
 | `--workers` | `NUM_WORKERS` | Số tiến trình đọc dữ liệu (mặc định ≤ 4) |
-| `--no-amp`, `--single-gpu`, `--no-cache`, `--cache-dir` | | Tốc độ, xem mục 3 |
+| `--no-amp`, `--multi-gpu`, `--no-cache`, `--cache-dir` | | Tốc độ, xem mục 3 |
 | `--cache-only` | `CACHE_ONLY` | Chỉ build cache rồi thoát (để tạo Kaggle Dataset) |
 | `--cache-search` | `CACHE_SEARCH` | Thư mục tìm cache build sẵn, chỉ đọc (Kaggle: `/kaggle/input`) |
 | `--time-limit-hours` | `TIME_LIMIT_H` | Dừng sớm và vẫn ghi kết quả (Kaggle: 11.5, `0` = không giới hạn) |
