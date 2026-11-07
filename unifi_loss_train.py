@@ -245,6 +245,27 @@ def ram_detail_str():
     return ' '.join(parts)
 
 
+_TRACE = {'snap': None}
+
+
+def _trace_report(top=6):
+    """UNIFI_TRACEMALLOC=1: in những dòng code Python cấp phát thêm nhiều nhất từ epoch trước."""
+    import tracemalloc
+    if not tracemalloc.is_tracing():
+        return
+    snap = tracemalloc.take_snapshot().filter_traces(
+        [tracemalloc.Filter(False, tracemalloc.__file__)])
+    cur, _ = tracemalloc.get_traced_memory()
+    if _TRACE['snap'] is not None:
+        diff = snap.compare_to(_TRACE['snap'], 'lineno')[:top]
+        log.info(f"          tracemalloc: Python đang giữ {cur / 2**20:.0f}M | tăng nhiều nhất:")
+        for st in diff:
+            fr = st.traceback[0]
+            log.info(f"            {st.size_diff / 2**20:+8.1f}M  ({st.count_diff:+d} obj)  "
+                     f"{fr.filename.split('/')[-1]}:{fr.lineno}")
+    _TRACE['snap'] = snap
+
+
 def release_host_memory():
     """Trả RAM rảnh về OS cuối mỗi epoch (phân mảnh malloc + cache pinned memory)."""
     import gc
@@ -568,6 +589,10 @@ def train(model, train_loader, test_loader,
         time_limit_s : dừng sớm (vẫn ghi đủ kết quả) nếu epoch kế tiếp có thể vượt
                        giới hạn này — tránh bị Kaggle cắt ngang ở mốc 12 giờ
     """
+    if os.environ.get('UNIFI_TRACEMALLOC'):
+        import tracemalloc
+        tracemalloc.start(1)
+        log.info("tracemalloc bật (UNIFI_TRACEMALLOC=1)")
     model = model.to(device)
     core  = model
     amp   = bool(amp and str(device).startswith('cuda'))
@@ -617,14 +642,17 @@ def train(model, train_loader, test_loader,
             if str(device).startswith('cuda'):
                 for d in range(torch.cuda.device_count()):
                     torch.cuda.reset_peak_memory_stats(d)
+            rss0 = _rss_gb(os.getpid())
 
             tr = train_one_epoch(model, train_loader, optimizer, pcon_loss_fn, device,
                                  beta1, beta2, scaler=scaler, amp=amp, grad_clip=grad_clip,
                                  epoch=epoch, log_interval=log_interval)
             t_train = time.time() - t0
+            rss1 = _rss_gb(os.getpid())
 
             # Test (cùng công thức loss để so sánh với train)
             res = evaluate(model, test_loader, device, pcon_loss_fn, beta1, beta2, amp=amp)
+            rss2 = _rss_gb(os.getpid())
             cm  = confusion(res['y_true'], res['y_pred'], num_classes)
             f1  = macro_f1(cm)
             v_acc = per_view_acc(res)
@@ -656,7 +684,10 @@ def train(model, train_loader, test_loader,
             release_host_memory()
             detail = ram_detail_str()
             if detail:
-                log.info(f"          ram chi tiết: {detail}{ram_str()}")
+                log.info(f"          ram chi tiết: {detail} | main Δtrain {(rss1 - rss0) * 1024:+.0f}M "
+                         f"Δeval {(rss2 - rss1) * 1024:+.0f}M Δsau {(_rss_gb(os.getpid()) - rss2) * 1024:+.0f}M"
+                         f"{ram_str()}")
+            _trace_report()
 
             if writer is not None:
                 writer.writerow({

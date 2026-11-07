@@ -173,6 +173,7 @@ CACHE_DIR    = Path('/tmp/unifi_cache') if IS_KAGGLE else CODE_DIR / 'cache'
 # Nơi tìm cache build sẵn (vd. Kaggle Dataset tạo từ output của --cache-only)
 CACHE_SEARCH = [Path('/kaggle/input')] if IS_KAGGLE else []
 CACHE_ONLY   = False      # chỉ build cache rồi thoát (không train)
+PIN_MEMORY   = False      # tắt: nghi gây leak RAM ~0.2 GB/epoch ở tiến trình chính (DataParallel + AMP)
 MAX_SAMPLES  = None       # giới hạn số mẫu (chạy thử nhanh), None = tất cả
 TIME_LIMIT_H = 11.5 if IS_KAGGLE else None   # Kaggle cắt phiên ở 12 giờ
 LOG_INTERVAL = 20         # in tiến độ mỗi N batch (0 = tắt)
@@ -424,7 +425,7 @@ def make_loader(samples, shuffle, device, cache_root=None):
         shuffle=shuffle,
         drop_last=shuffle and len(ds) > BATCH_SIZE,   # train: bỏ batch lẻ cuối (BN + contrastive)
         num_workers=nw,
-        pin_memory=shuffle and device == 'cuda',
+        pin_memory=PIN_MEMORY and shuffle and device == 'cuda',
         persistent_workers=nw > 0,
         prefetch_factor=2 if nw > 0 else None,
         worker_init_fn=_worker_init,
@@ -543,6 +544,7 @@ def config_dict():
         'use_cache'   : USE_CACHE,
         'cache_dir'   : str(CACHE_DIR),
         'cache_search': [str(d) for d in CACHE_SEARCH],
+        'pin_memory'  : PIN_MEMORY,
         'num_workers' : NUM_WORKERS,
         'max_samples' : MAX_SAMPLES,
         'time_limit_h': TIME_LIMIT_H,
@@ -747,6 +749,9 @@ def parse_args(argv=None):
     g.add_argument('--cache-dir', default=str(CACHE_DIR), help='nơi ghi cache (build mới)')
     g.add_argument('--cache-search', nargs='*', default=[str(d) for d in CACHE_SEARCH],
                    help='thư mục tìm cache build sẵn (chỉ đọc), vd. /kaggle/input')
+    g.add_argument('--pin-memory', action='store_true', help='bật pin_memory cho train loader')
+    g.add_argument('--trace-mem', action='store_true',
+                   help='tracemalloc: in dòng code Python giữ thêm RAM mỗi epoch (chậm hơn chút)')
     g.add_argument('--cache-only', action='store_true',
                    help='chỉ build cache rồi thoát; dùng với --cache-dir /kaggle/working/unifi_cache')
     g.add_argument('--time-limit-hours', type=float, default=TIME_LIMIT_H,
@@ -764,7 +769,7 @@ def apply_args(a):
     global DATA_ROOT, OUTPUT_DIR, RUN_NAME, USERS, GESTURES, MAX_SAMPLES, SPLIT_BY, TEST_VALUES
     global TEST_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
     global RX_DIRECTIONS, DFS_HIGHPASS, NUM_WORKERS, AMP, MULTI_GPU, USE_CACHE, CACHE_DIR
-    global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY
+    global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY
     DATA_ROOT    = Path(a.data_root)
     OUTPUT_DIR   = Path(a.output_dir)
     RUN_NAME     = a.run_name
@@ -792,6 +797,9 @@ def apply_args(a):
     CACHE_DIR    = Path(a.cache_dir)
     CACHE_SEARCH = [Path(d) for d in a.cache_search]
     CACHE_ONLY   = a.cache_only
+    PIN_MEMORY   = a.pin_memory
+    if a.trace_mem:
+        os.environ['UNIFI_TRACEMALLOC'] = '1'
     if CACHE_ONLY and not USE_CACHE:
         raise SystemExit('--cache-only không đi cùng --no-cache')
     TIME_LIMIT_H = a.time_limit_hours or None
