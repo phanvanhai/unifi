@@ -130,6 +130,10 @@ GESTURE_NAMES = {1: 'Push&Pull', 2: 'Sweep', 3: 'Clap', 4: 'Slide', 5: 'Draw-O',
 SPLIT_BY    = 'random'
 TEST_VALUES = []
 TEST_RATIO  = 0.2
+# Widar: val = VAL_RATIO của phần train+val, mỗi lớp (UniFi mục 6.1 lấy 80% làm "training and
+# validation set" nhưng không nêu tỉ lệ val) → 72 / 8 / 20. 0 = không val, chọn theo test.
+# SSHAR không dùng biến này: val theo SSHAR_ESP_protocol.md.
+VAL_RATIO   = 0.1
 
 # Tọa độ (m) theo sơ đồ Widar 3.0: gốc tại Tx, x sang trái, y xuống dưới
 # Vùng cảm biến 2m × 2m: x ∈ [0, 2], y ∈ [0, 2]
@@ -214,6 +218,9 @@ CACHE_ONLY   = False      # chỉ build cache rồi thoát (không train)
 PIN_MEMORY   = False      # tắt: nghi gây leak RAM ~0.2 GB/epoch ở tiến trình chính (DataParallel + AMP)
 MAX_SAMPLES  = None       # giới hạn số mẫu (chạy thử nhanh), None = tất cả
 TIME_LIMIT_H = 11.5 if IS_KAGGLE else None   # Kaggle cắt phiên ở 12 giờ
+# Early stopping theo val acc (không có trong bài UniFi): dừng khi PATIENCE epoch liên tiếp
+# không có val acc mới cao nhất; checkpoint tốt nhất vẫn là epoch có val acc cao nhất. 0 = tắt
+PATIENCE     = 10
 LOG_INTERVAL = 20         # in tiến độ mỗi N batch (0 = tắt)
 RUN_NAME     = None       # tên thư mục run (None → <thời gian>_<kiểu chia>)
 MAKE_PLOTS   = True       # vẽ hình (plot_logs.py) khi train xong
@@ -465,12 +472,31 @@ def subsample(samples, n, seed):
 
 
 def split_samples(samples):
-    """Trả về dict tên tập → list mẫu: Widar {'train','test'}, SSHAR {'train','val','test'}."""
+    """dict tên tập → list mẫu: SSHAR và Widar {'train','val','test'} (Widar --val-ratio 0: {'train','test'})."""
     if DATASET == 'sshar':
         if SPLIT_BY != 'protocol':
             raise ValueError("SSHAR chỉ dùng --split protocol (SSHAR_ESP_protocol.md)")
         return {k: [s for s in samples if s['split'] == k] for k in ('train', 'val', 'test')}
-    return dict(zip(('train', 'test'), _split_widar(samples)))
+    train_s, test_s = _split_widar(samples)
+    if VAL_RATIO <= 0:
+        return {'train': train_s, 'test': test_s}
+    train_s, val_s = _stratified_take(train_s, VAL_RATIO, SEED + 1)
+    return {'train': train_s, 'val': val_s, 'test': test_s}
+
+
+def _stratified_take(samples, ratio, seed):
+    """Tách ngẫu nhiên `ratio` mẫu của MỖI lớp → (phần còn lại, phần tách ra)."""
+    rng = random.Random(seed)
+    rest, taken = [], []
+    for c in sorted({s['label'] for s in samples}):
+        cls = [s for s in samples if s['label'] == c]
+        rng.shuffle(cls)
+        n = int(round(len(cls) * ratio))
+        if n == 0 and len(cls) > 1 and ratio > 0:
+            n = 1   # lớp quá ít mẫu (chạy thử --max-samples) vẫn có 1 mẫu
+        taken += cls[:n]
+        rest  += cls[n:]
+    return rest, taken
 
 
 def _split_widar(samples):
@@ -640,6 +666,7 @@ def config_dict():
         'final_test'  : FINAL_TEST,
         'test_values' : TEST_VALUES,
         'test_ratio'  : TEST_RATIO,
+        'val_ratio'   : VAL_RATIO,
         'rx_pos'      : RX_POS,
         'use_mask'    : RX_DIRECTIONS is not None,
         'D'           : D,
@@ -663,6 +690,7 @@ def config_dict():
         'num_workers' : NUM_WORKERS,
         'max_samples' : MAX_SAMPLES,
         'time_limit_h': TIME_LIMIT_H,
+        'patience'    : PATIENCE,
     }
 
 
@@ -775,14 +803,19 @@ def main():
         train_loader = make_loader(sets['train'], shuffle=True, device=device, cache_root=cache_root)
         eval_loader  = make_loader(sets[eval_name], shuffle=False, device=device, cache_root=cache_root)
         final_eval = None
-        if DATASET == 'sshar' and FINAL_TEST:
+        if eval_name == 'val' and (DATASET != 'sshar' or FINAL_TEST):
             test_loader = make_loader(sets['test'], shuffle=False, device=device, cache_root=cache_root)
             final_eval  = [('val',  eval_loader, [sample_meta(s) for s in sets['val']]),
                            ('test', test_loader, [sample_meta(s) for s in sets['test']])]
+        if DATASET == 'sshar' and FINAL_TEST:
             log.warning("FINAL TEST: sau khi train sẽ đánh giá checkpoint tốt nhất (theo val) trên test "
                         "— chỉ chạy 1 lần ở bước cuối, không điều chỉnh gì sau khi xem kết quả")
         elif DATASET == 'sshar':
             log.info("Development: chọn checkpoint và báo cáo trên val, không đụng tới test")
+        elif eval_name == 'val':
+            log.info("Chọn checkpoint theo val acc; test chỉ đánh giá 1 lần bằng checkpoint đó sau khi train")
+        else:
+            log.warning("--val-ratio 0: chọn checkpoint theo TEST acc (kết quả lạc quan)")
 
         # Kiểm tra 1 batch trước khi train
         t0 = time.time()
@@ -807,10 +840,10 @@ def main():
                        amp=AMP, multi_gpu=MULTI_GPU,
                        weight_decay=WEIGHT_DECAY, grad_clip=GRAD_CLIP,
                        time_limit_s=TIME_LIMIT_H * 3600 if TIME_LIMIT_H else None,
-                       log_interval=LOG_INTERVAL,
+                       log_interval=LOG_INTERVAL, patience=PATIENCE,
                        extra_summary={'run_dir': str(run_dir), 'dataset': DATASET,
                                       'split_by': SPLIT_BY, 'test_values': TEST_VALUES,
-                                      'final_test': FINAL_TEST,
+                                      'val_ratio': VAL_RATIO, 'final_test': FINAL_TEST,
                                       **{f'n_{n}': len(ss) for n, ss in sets.items()},
                                       'git_commit': env.get('git_commit')})
 
@@ -874,6 +907,9 @@ def parse_args(argv=None):
     g.add_argument('--test-values', nargs='*', type=_int_or_str, default=TEST_VALUES,
                    help="ví dụ: --split location --test-values 3 ; --split user --test-values user5")
     g.add_argument('--test-ratio', type=float, default=TEST_RATIO)
+    g.add_argument('--val-ratio', type=float, default=VAL_RATIO,
+                   help='Widar: tỉ lệ val tách từ phần train (mỗi lớp); 0 = không val, chọn theo test. '
+                        'SSHAR: bỏ qua (val theo protocol)')
     g.add_argument('--seed', type=int, default=SEED)
 
     g = p.add_argument_group('huấn luyện')
@@ -902,6 +938,8 @@ def parse_args(argv=None):
                    help='tracemalloc: in dòng code Python giữ thêm RAM mỗi epoch (chậm hơn chút)')
     g.add_argument('--cache-only', action='store_true',
                    help='chỉ build cache rồi thoát; dùng với --cache-dir /kaggle/working/unifi_cache')
+    g.add_argument('--patience', type=int, default=PATIENCE,
+                   help='early stopping: số epoch không cải thiện val acc trước khi dừng (0 = tắt)')
     g.add_argument('--time-limit-hours', type=float, default=TIME_LIMIT_H,
                    help='dừng sớm (vẫn ghi kết quả) trước giới hạn này; 0 = không giới hạn')
     g.add_argument('--log-interval', type=int, default=LOG_INTERVAL)
@@ -917,8 +955,8 @@ def apply_args(a):
     global DATA_ROOT, OUTPUT_DIR, RUN_NAME, USERS, GESTURES, MAX_SAMPLES, SPLIT_BY, TEST_VALUES
     global TEST_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
     global RX_DIRECTIONS, DFS_HIGHPASS, NUM_WORKERS, AMP, MULTI_GPU, USE_CACHE, CACHE_DIR
-    global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY
-    global DATASET, FINAL_TEST, GESTURE_NAMES, V, RX_POS
+    global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY, PATIENCE
+    global DATASET, FINAL_TEST, GESTURE_NAMES, V, RX_POS, VAL_RATIO
     DATASET      = a.dataset
     FINAL_TEST   = a.final_test
     if DATASET == 'sshar':
@@ -942,6 +980,7 @@ def apply_args(a):
     MAX_SAMPLES  = a.max_samples
     TEST_VALUES  = a.test_values
     TEST_RATIO   = a.test_ratio
+    VAL_RATIO    = a.val_ratio
     SEED         = a.seed
     NUM_EPOCHS   = a.epochs
     BATCH_SIZE   = a.batch_size
@@ -966,6 +1005,7 @@ def apply_args(a):
     if CACHE_ONLY and not USE_CACHE:
         raise SystemExit('--cache-only không đi cùng --no-cache')
     TIME_LIMIT_H = a.time_limit_hours or None
+    PATIENCE     = a.patience
     LOG_INTERVAL = a.log_interval
     MAKE_PLOTS   = not a.no_plots
     ZIP_RUN      = a.zip_run

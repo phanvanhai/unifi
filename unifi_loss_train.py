@@ -591,7 +591,7 @@ def train(model, train_loader, eval_loader,
           log_dir=None, eval_meta=None, class_names=None,
           amp=False, multi_gpu=False, weight_decay=0.0, grad_clip=None,
           time_limit_s=None, log_interval=20, extra_summary=None,
-          eval_name='test', final_eval=None):
+          eval_name='test', final_eval=None, patience=None):
     """
     Training loop đầy đủ.
 
@@ -610,6 +610,8 @@ def train(model, train_loader, eval_loader,
             <tên>_predictions_final.csv, confusion_matrix_<tên>_final.csv   (final_eval)
             last_model.pth, summary.json
         eval_meta    : list dict thông tin từng mẫu của eval_loader (cùng thứ tự)
+        patience     : early stopping — dừng khi `patience` epoch liên tiếp không có
+                       eval acc mới cao nhất (None/0 = tắt)
         amp, multi_gpu, time_limit_s : xem main.py
     """
     if os.environ.get('UNIFI_TRACEMALLOC'):
@@ -652,6 +654,7 @@ def train(model, train_loader, eval_loader,
     best_acc    = -1.0
     best_epoch  = 0
     best_m      = None
+    since_best  = 0
     epochs_done = 0
     t_start     = time.time()
     res         = None
@@ -736,6 +739,7 @@ def train(model, train_loader, eval_loader,
                 })
                 hist_f.flush()
 
+            since_best = 0 if is_best else since_best + 1
             if is_best:
                 best_acc, best_epoch, best_m = res['acc'], epoch, m
                 torch.save(core.state_dict(), save_path)
@@ -745,6 +749,12 @@ def train(model, train_loader, eval_loader,
                     save_confusion_matrix(log_dir / 'confusion_matrix_best.csv',
                                           res['y_true'], res['y_pred'],
                                           num_classes, class_names)
+
+            if patience and since_best >= patience and epoch < num_epochs:
+                stop_reason = 'early_stop'
+                log.warning(f"Early stopping sau epoch {epoch}: {patience} epoch liên tiếp không cải thiện "
+                            f"{E} acc (tốt nhất {best_acc:.4f} tại epoch {best_epoch})")
+                break
 
             if time_limit_s and epoch < num_epochs:
                 need = max(epoch_times[-3:]) * 1.15
@@ -776,6 +786,7 @@ def train(model, train_loader, eval_loader,
                 f'last_{E}'        : metrics_of(res, num_classes, names),
                 'epochs_done'      : epochs_done,
                 'num_epochs'       : num_epochs,
+                'patience'         : patience,
                 'mean_epoch_time_s': round(float(np.mean(epoch_times)), 1) if epoch_times else None,
                 'total_time_s'     : round(time.time() - t_start, 1),
                 'best_model_path'  : str(save_path),

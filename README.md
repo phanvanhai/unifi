@@ -59,7 +59,7 @@ Code tự tìm `sshar_amp_interp` trong `/kaggle/input`, ở `../../CodeForPaper
 | Spatial mask | theo toạ độ 6 Rx | không dùng (chưa có toạ độ receiver) |
 | Chọn checkpoint | test acc | val acc |
 
-Siêu tham số giữ theo bài UniFi: batch 32, 100 epoch, Adam, lr 0.005, β1 = 1.0, β2 = 0.05, không scheduler / early stopping / augmentation. Ảnh min-max trên từng mẫu (như bài), không dùng thống kê toàn tập.
+Siêu tham số giữ theo bài UniFi: batch 32, tối đa 100 epoch, Adam, lr 0.005, β1 = 1.0, β2 = 0.05; không scheduler / augmentation. Thiết lập riêng của mô hình (protocol mục 4, cần ghi vào báo cáo): **early stopping patience 10 theo val accuracy** (`--patience`, `0` = tắt), chạy 1 GPU. Ảnh min-max trên từng mẫu (như bài), không dùng thống kê toàn tập.
 
 Hai giai đoạn của protocol:
 
@@ -169,6 +169,7 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--output-dir` | `OUTPUT_DIR` | Nơi tạo `runs/` (Kaggle: `/kaggle/working`) |
 | `--users`, `--gestures` | `USERS`, `GESTURES` | User và gesture id được dùng (nhãn = vị trí trong list) |
 | `--split`, `--test-values`, `--test-ratio` | `SPLIT_BY`, `TEST_VALUES`, `TEST_RATIO` | Widar: `random` (in-domain, 20% test) / `user` / `location` / `orientation`; SSHAR: `protocol` |
+| `--val-ratio` | `VAL_RATIO` | Widar: tỉ lệ val tách từ phần train, mỗi lớp (mặc định 0.1; `0` = không val, chọn checkpoint theo test). SSHAR: val theo protocol |
 | `--epochs`, `--batch-size`, `--lr`, `--beta1`, `--beta2` | | Theo bài báo: 100*, 32, 0.005, 1.0, 0.05 (*bài không nêu số epoch) |
 | `--weight-decay`, `--grad-clip` | | Không có trong bài, mặc định tắt |
 | `--no-mask`, `--no-highpass` | | Tắt spatial mask / tắt lọc thông cao 2 Hz trước DFS |
@@ -176,11 +177,14 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--no-amp`, `--multi-gpu`, `--no-cache`, `--cache-dir` | | Tốc độ, xem mục 3 |
 | `--cache-only` | `CACHE_ONLY` | Chỉ build cache rồi thoát (để tạo Kaggle Dataset) |
 | `--cache-search` | `CACHE_SEARCH` | Thư mục tìm cache build sẵn, chỉ đọc (Kaggle: `/kaggle/input`) |
+| `--patience` | `PATIENCE` | Early stopping theo val acc: dừng khi 10 epoch liên tiếp không có val acc mới cao nhất (`0` = tắt; không có trong bài UniFi) |
 | `--time-limit-hours` | `TIME_LIMIT_H` | Dừng sớm và vẫn ghi kết quả (Kaggle: 11.5, `0` = không giới hạn) |
 | `--max-samples` | `MAX_SAMPLES` | Chỉ lấy N mẫu, chia đều theo lớp, để chạy thử |
 | `--run-name`, `--log-interval`, `--no-plots`, `--zip/--no-zip` | | Tên run, tần suất log, vẽ hình, nén run |
 
-**Chia dữ liệu (Widar):** chỉ có train và test, như bài UniFi và WiGRUNT. Checkpoint được chọn theo **test accuracy cao nhất**, nên con số này hơi lạc quan. Kết quả của epoch cuối (`*_last`) vẫn được lưu song song để báo cáo.
+**Chia dữ liệu Widar (train / val / test):** theo bài UniFi (mục 6.1): in-domain lấy ngẫu nhiên 80% làm *training and validation set*, 20% làm test (6,750 mẫu → 5,400 / 1,350); cross-location / cross-orientation lấy 4 location/orientation làm train+val, 1 làm test. Bài không nêu tỉ lệ val, nên code tách **10% của phần train+val** (mỗi lớp) làm val: in-domain thành **72 / 8 / 20** (~4,855 / 540 / 1,345 mẫu sau khi bỏ mẫu lỗi). Tập test không đổi so với khi không có val.
+
+Checkpoint được chọn theo **val accuracy cao nhất**; sau khi train xong, checkpoint đó được đánh giá **một lần** trên val và test (`summary.json` → `final.test`: accuracy, precision / recall / F1 macro). Early stopping (`--patience 10`, mặc định) theo dõi cùng val acc này và dừng khi 10 epoch liên tiếp không có giá trị mới cao nhất; `summary.json` ghi `stop_reason: early_stop`. `--val-ratio 0` trở về cách cũ: chọn checkpoint theo test acc (lạc quan, chỉ để so sánh với các run cũ).
 
 Biến môi trường (không bắt buộc): `UNIFI_DATA_ROOT`, `UNIFI_OUTPUT_DIR`.
 
