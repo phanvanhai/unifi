@@ -27,7 +27,6 @@ import json
 import math
 import time
 import random
-import re
 import shutil
 import logging
 import argparse
@@ -111,8 +110,6 @@ def find_data_root():
 # Cấu hình (giá trị mặc định — ghi đè được bằng tham số dòng lệnh)
 # =============================================================================
 
-# Dataset: 'widar' (Widar 3.0, mặc định) | 'sshar' (SSHAR ESP, theo SSHAR_ESP_protocol.md)
-DATASET   = 'widar'
 DATA_ROOT = find_data_root()
 USERS     = ['user5', 'user10', 'user11', 'user12', 'user13', 'user14', 'user15', 'user16', 'user17']
 GESTURES  = [1, 2, 3, 4, 5, 6] # gesture id trong tên file (nhãn = vị trí trong list)
@@ -146,39 +143,6 @@ CENTER = (1.0, 1.0)      # Loc5 — tâm vùng cảm biến
 # (đã kiểm tra: cặp gần hướng nhất gần như không đổi giữa 5 location)
 # Đặt None → không dùng mask (mọi view attend lẫn nhau)
 RX_DIRECTIONS = [math.atan2(y - CENTER[1], x - CENTER[0]) for x, y in RX_POS]
-
-# ── SSHAR ESP (SSHAR_ESP_protocol.md) ──────────────────────────────────────
-# ESP32: 3 receiver x 1 anten, 56 subcarrier, chỉ có BIÊN ĐỘ, 1000 điểm = 5 s @ 200 Hz.
-# Không có CSI ratio / pha → nhánh "pha" của UniFi nhận ảnh biên độ [56, T], nhánh DFS
-# tính từ biên độ (unifi_preprocessing.extract_dfs_amp). Chưa có toạ độ receiver →
-# không dùng spatial mask. Chia 7:1:2 theo lần lặp, chọn checkpoint theo val acc.
-SSHAR_DEVICE   = 'esp'
-SSHAR_RX       = ['rx_00', 'rx_01', 'rx_02']
-SSHAR_SUBJECTS = ['subject_01', 'subject_02', 'subject_03', 'subject_04', 'subject_09',
-                  'subject_10', 'subject_11', 'subject_12', 'subject_13', 'subject_14']
-SSHAR_ACTS     = [1, 2, 3, 4, 5, 6, 7, 8]
-SSHAR_EXPECTED = {'train': 4480, 'val': 640, 'test': 1280}   # đủ 10 người x 8 hành động
-FINAL_TEST     = False    # True: đánh giá thêm trên test (1 lần duy nhất, bước cuối)
-SSHAR_PATTERN  = re.compile(r'act(\d+)_pos(\d+)_dir(\d+)_rep(\d+)')
-
-
-def find_sshar_root():
-    """Thư mục chứa room_XX/<device>/rx_YY/... (vd. sshar_amp_interp)."""
-    env = os.environ.get('UNIFI_SSHAR_ROOT')
-    if env:
-        return Path(env)
-    cands = [CODE_DIR / 'sshar_amp_interp',
-             CODE_DIR.parent.parent / 'CodeForPaper' / 'benchmark' / 'data' / 'sshar_amp_interp']
-    kin = Path('/kaggle/input')
-    if kin.is_dir():
-        for depth in range(0, 7):
-            for p in sorted(kin.glob('/'.join(['*'] * depth + ['room_*', SSHAR_DEVICE]))):
-                cands.append(p.parent.parent)
-    for c in cands:
-        if c.is_dir() and any(c.glob(f'room_*/{SSHAR_DEVICE}')):
-            return c
-    return cands[0]
-
 
 # Siêu tham số (theo bài báo)
 D          = 64
@@ -298,14 +262,7 @@ def read_bf_file(path):
 
 
 def load_view(path):
-    """
-    1 file của 1 receiver:
-      .dat (Widar)  → H_r [K=30, T] complex (CSI ratio 2 anten)
-      .npy (SSHAR)  → biên độ [anten * K, T] float32 (ESP: [56, 1000])
-    """
-    if str(path).endswith('.npy'):
-        a = np.load(path).astype(np.float32)          # (anten, K, T)
-        return a.reshape(-1, a.shape[-1])
+    """1 file .dat → H_r [K=30, T] complex (CSI ratio 2 anten)."""
     csi = read_bf_file(path)                 # [T, 30, 3]
     H   = csi.transpose(2, 1, 0)[None, None] # [M=1, R=1, N=3, K=30, T]
     return csi_ratio(H, rx_idx=0, ant1=0, ant2=1)
@@ -398,55 +355,6 @@ def scan_samples():
     return samples
 
 
-def sshar_split_of(pos, direction, rep):
-    """SSHAR_ESP_protocol.md mục 3 (chép nguyên văn bản tham chiếu)."""
-    if direction == 0:                      # 10 lần lặp
-        return 'test' if rep > 8 else 'val' if rep == 8 else 'train'
-    if rep == 5:                            # dir01 / dir02, 5 lần lặp
-        return 'test'
-    val_dir = 1 if pos % 2 else 2           # pos lẻ -> dir01, pos chẵn -> dir02
-    return 'val' if rep == 4 and direction == val_dir else 'train'
-
-
-def scan_sshar():
-    """
-    <root>/room_XX/<device>/rx_YY/subject_ZZ/amp_actAA_posBB_dirCC_repDD.npy
-    Mỗi mẫu = file cùng tên ở mọi receiver trong SSHAR_RX (thiếu 1 receiver → lỗi).
-    """
-    root, samples = Path(DATA_ROOT), []
-    for room in sorted(p for p in root.iterdir() if p.is_dir() and p.name.startswith('room')):
-        first = room / SSHAR_DEVICE / SSHAR_RX[0]
-        if not first.is_dir():
-            continue
-        for subj in sorted(p for p in first.iterdir() if p.is_dir() and p.name in USERS):
-            n_subj = 0
-            for f in sorted(subj.glob('*.npy')):
-                m = SSHAR_PATTERN.search(f.name)
-                if m is None:
-                    continue
-                act, pos, direction, rep = map(int, m.groups())
-                if act not in GESTURES:
-                    continue
-                paths = [room / SSHAR_DEVICE / rx / subj.name / f.name for rx in SSHAR_RX]
-                miss = [str(q) for q in paths if not q.is_file()]
-                if miss:
-                    raise FileNotFoundError(f"{f.name} thiếu ở receiver: {miss}")
-                samples.append({
-                    'id'         : f"{room.name}/{subj.name}/{f.stem}",
-                    'paths'      : [str(q) for q in paths],
-                    'label'      : GESTURES.index(act),
-                    'user'       : subj.name,
-                    'location'   : pos,
-                    'orientation': direction,
-                    'rep'        : rep,
-                    'split'      : sshar_split_of(pos, direction, rep),
-                })
-                n_subj += 1
-            log.info(f"  {room.name}/{subj.name}: {n_subj:5d} mẫu")
-    log.info(f"Tìm thấy {len(samples)} mẫu SSHAR ({SSHAR_DEVICE}, {len(SSHAR_RX)} receiver)")
-    return samples
-
-
 def subsample(samples, n, seed):
     """Lấy n mẫu chia đều theo lớp (dùng cho --max-samples)."""
     rng = random.Random(seed)
@@ -463,15 +371,6 @@ def subsample(samples, n, seed):
 
 
 def split_samples(samples):
-    """Trả về dict tên tập → list mẫu: Widar {'train','test'}, SSHAR {'train','val','test'}."""
-    if DATASET == 'sshar':
-        if SPLIT_BY != 'protocol':
-            raise ValueError("SSHAR chỉ dùng --split protocol (SSHAR_ESP_protocol.md)")
-        return {k: [s for s in samples if s['split'] == k] for k in ('train', 'val', 'test')}
-    return dict(zip(('train', 'test'), _split_widar(samples)))
-
-
-def _split_widar(samples):
     if SPLIT_BY == 'random':
         # Chia đều theo từng lớp để test có đủ mọi cử chỉ
         rng = random.Random(SEED)
@@ -496,11 +395,6 @@ def _split_widar(samples):
 
 def prep_params():
     """Tham số tiền xử lý (ghi vào config + làm khoá cache)."""
-    if DATASET == 'sshar':
-        # 200 Hz: cửa sổ 64 điểm = 0.32 s (Widar: 256 điểm = 0.256 s), hop 4 = 20 ms
-        # → L = (1000 - 64) / 4 + 1 = 235 khung; nfft 200 → 1 Hz/bin, 0..60 Hz = 61 bin
-        return {'signal': 'amp', 'fs': 200, 'nperseg': 64, 'noverlap': 60, 'nfft': 200,
-                'f_max': 60, 'highpass': DFS_HIGHPASS}
     return {'fs': 1000, 'nperseg': 256, 'noverlap': 248, 'nfft': 1000,
             'f_max': 60, 'highpass': DFS_HIGHPASS}
 
@@ -520,7 +414,7 @@ def make_loader(samples, shuffle, device, cache_root=None):
         ds = CachedWiDarDataset(cache_root, [s['id'] for s in samples], labels)
     else:
         ds = WiDarDataset(LazyCSIList([s['paths'] for s in samples]), labels,
-                          **prep_params())
+                          highpass=DFS_HIGHPASS)
     # Test: 2 worker, không pin_memory. Worker phải persistent: tạo lại DataLoader
     # mỗi epoch = 1 thread pin_memory mới gọi CUDA → leak ~0.2 GB RAM/epoch ở
     # tiến trình chính (đo trên Kaggle). Test chỉ 43 batch nên bỏ pin không đáng kể.
@@ -602,28 +496,23 @@ def env_info(device):
 
 def sample_meta(s):
     """Thông tin 1 mẫu để ghi vào CSV (base name, user, location, orientation)."""
-    m = {
+    return {
         'sample'     : s['id'],
         'user'       : s['user'],
         'location'   : s['location'],
         'orientation': s['orientation'],
     }
-    if 'rep' in s:
-        m['rep'] = s['rep']
-    return m
 
 
-def log_split_stats(sets, class_names):
-    """In phân bố mẫu các tập theo lớp, user, location, orientation."""
-    cnt  = {n: None for n in sets}
-    tag  = '/'.join(sets)
+def log_split_stats(train_s, test_s, class_names):
+    """In phân bố mẫu train/test theo lớp, user, location, orientation."""
     for key in ('label', 'user', 'location', 'orientation'):
-        cnt  = {n: Counter(s[key] for s in ss) for n, ss in sets.items()}
-        keys = sorted(set().union(*cnt.values()), key=lambda x: (len(str(x)), str(x)))
+        tr = Counter(s[key] for s in train_s)
+        te = Counter(s[key] for s in test_s)
+        keys = sorted(set(tr) | set(te), key=lambda x: (len(str(x)), str(x)))
         name = (lambda k: class_names[k]) if key == 'label' else str
-        log.info(f"  theo {key:<11}: "
-                 + ' | '.join(f"{name(k)} " + '/'.join(str(c[k]) for c in cnt.values()) for k in keys)
-                 + f"   ({tag})")
+        log.info(f"  theo {key:<11}: " + ' | '.join(f"{name(k)} {tr[k]}/{te[k]}" for k in keys)
+                 + "   (train/test)")
 
 
 def config_dict():
@@ -633,9 +522,7 @@ def config_dict():
         'users'       : USERS,
         'gestures'    : GESTURES,
         'V'           : V,
-        'dataset'     : DATASET,
         'split_by'    : SPLIT_BY,
-        'final_test'  : FINAL_TEST,
         'test_values' : TEST_VALUES,
         'test_ratio'  : TEST_RATIO,
         'rx_pos'      : RX_POS,
@@ -664,10 +551,10 @@ def config_dict():
     }
 
 
-def save_run_info(run_dir, env, sets, class_names, mask):
-    """config.json (siêu tham số + môi trường) và split.csv (mẫu nào thuộc tập nào)."""
+def save_run_info(run_dir, env, train_s, test_s, class_names, mask):
+    """config.json (siêu tham số + môi trường) và split.csv (mẫu nào thuộc train/test)."""
     config = {'run_name': run_dir.name, **config_dict(), 'class_names': class_names,
-              **{f'n_{n}': len(ss) for n, ss in sets.items()},
+              'n_train': len(train_s), 'n_test': len(test_s),
               'spatial_mask': None if mask is None else
               [[0 if x == 0 else '-inf' for x in row] for row in mask.tolist()],
               'env': env, 'cmdline': sys.argv}
@@ -676,12 +563,12 @@ def save_run_info(run_dir, env, sets, class_names, mask):
 
     with open(run_dir / 'split.csv', 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
-        w.writerow(['set', 'sample', 'user', 'location', 'orientation', 'rep', 'label', 'class_name'])
-        for name, ss in sets.items():
+        w.writerow(['set', 'sample', 'user', 'location', 'orientation', 'label', 'class_name'])
+        for name, ss in (('train', train_s), ('test', test_s)):
             for s in ss:
                 m = sample_meta(s)
                 w.writerow([name, m['sample'], m['user'], m['location'], m['orientation'],
-                            m.get('rep', ''), s['label'], class_names[s['label']]])
+                            s['label'], class_names[s['label']]])
 
 
 # =============================================================================
@@ -698,8 +585,6 @@ def main():
 
     # Mỗi lần chạy 1 thư mục riêng: <OUTPUT_DIR>/runs/<thời gian>_<split>
     split_tag = SPLIT_BY if not TEST_VALUES else f"{SPLIT_BY}-{'_'.join(map(str, TEST_VALUES))}"
-    if DATASET == 'sshar':
-        split_tag = f"sshar-{SSHAR_DEVICE}_{'final' if FINAL_TEST else 'dev'}"
     run_dir   = Path(OUTPUT_DIR) / 'runs' / (RUN_NAME or f"{datetime.now():%Y%m%d_%H%M%S}_{split_tag}")
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(run_dir)
@@ -723,41 +608,32 @@ def main():
         if not Path(DATA_ROOT).is_dir():
             raise FileNotFoundError(f"Không thấy thư mục dữ liệu {DATA_ROOT} — truyền --data-root")
         log.info(f"Quét dữ liệu trong {DATA_ROOT} ...")
-        samples = scan_sshar() if DATASET == 'sshar' else scan_samples()
+        samples = scan_samples()
         if not samples:
             raise RuntimeError(f"Không có mẫu nào trong {DATA_ROOT} — kiểm tra --data-root / --users")
         if MAX_SAMPLES:
             samples = subsample(samples, MAX_SAMPLES, SEED)
             log.warning(f"--max-samples: chỉ dùng {len(samples)} mẫu (chạy thử)")
 
-        sets = split_samples(samples)
-        empty = [n for n, ss in sets.items() if not ss]
-        if empty:
-            raise RuntimeError(f"Tập rỗng: {empty} — kiểm tra SPLIT_BY/TEST_VALUES")
-        log.info(' | '.join(f"{n.capitalize()}: {len(ss)} mẫu" for n, ss in sets.items()))
-        log_split_stats(sets, class_names)
-        if DATASET == 'sshar' and not MAX_SAMPLES and USERS == SSHAR_SUBJECTS \
-                and GESTURES == SSHAR_ACTS:
-            got = {n: len(ss) for n, ss in sets.items()}
-            if got != SSHAR_EXPECTED:
-                raise RuntimeError(f"Số mẫu {got} != protocol {SSHAR_EXPECTED}")
-            log.info(f"Số mẫu khớp protocol: {got}")
+        train_s, test_s = split_samples(samples)
+        if not train_s or not test_s:
+            raise RuntimeError(f"Tập rỗng: train={len(train_s)}, test={len(test_s)} — kiểm tra SPLIT_BY/TEST_VALUES")
+        log.info(f"Train: {len(train_s)} mẫu | Test: {len(test_s)} mẫu")
+        log_split_stats(train_s, test_s, class_names)
 
         Mask = build_spatial_mask(V, RX_DIRECTIONS) if RX_DIRECTIONS is not None else None
         if Mask is not None:
             log.info("Spatial mask (1 = được attend):\n" +
                      '\n'.join('    r%d: ' % (i + 1) + ' '.join('1' if x == 0 else '.' for x in row)
                                for i, row in enumerate(Mask.tolist())))
-        else:
-            log.info("Không dùng spatial mask (mọi view attend lẫn nhau)")
 
-        save_run_info(run_dir, env, sets, class_names, Mask)
+        save_run_info(run_dir, env, train_s, test_s, class_names, Mask)
 
         # ── Cache tiền xử lý ──────────────────────────────────────────────
         cache_root = None
         if USE_CACHE:
-            # sắp theo id → khoá cache không phụ thuộc cách chia (dùng chung giữa các run)
-            used = sorted((s for ss in sets.values() for s in ss), key=lambda s: s['id'])
+            # sắp theo id → khoá cache không phụ thuộc cách chia train/test (dùng chung giữa các run)
+            used = sorted(train_s + test_s, key=lambda s: s['id'])
             cache_root = build_or_load_cache(
                 used, [s['id'] for s in used], load_view, prep_params(), CACHE_DIR,
                 num_workers=NUM_WORKERS, search_dirs=CACHE_SEARCH)
@@ -766,25 +642,14 @@ def main():
                          f"thư mục này rồi Add Input cho notebook train")
                 return None
         else:
-            log.info("Không dùng cache: đọc file + STFT mỗi epoch (chậm)")
+            log.info("Không dùng cache: đọc .dat + STFT mỗi epoch (chậm)")
 
-        # Tập chọn checkpoint: val (SSHAR) hoặc test (Widar, như UniFi)
-        eval_name = 'val' if 'val' in sets else 'test'
-        train_loader = make_loader(sets['train'], shuffle=True, device=device, cache_root=cache_root)
-        eval_loader  = make_loader(sets[eval_name], shuffle=False, device=device, cache_root=cache_root)
-        final_eval = None
-        if DATASET == 'sshar' and FINAL_TEST:
-            test_loader = make_loader(sets['test'], shuffle=False, device=device, cache_root=cache_root)
-            final_eval  = [('val',  eval_loader, [sample_meta(s) for s in sets['val']]),
-                           ('test', test_loader, [sample_meta(s) for s in sets['test']])]
-            log.warning("FINAL TEST: sau khi train sẽ đánh giá checkpoint tốt nhất (theo val) trên test "
-                        "— chỉ chạy 1 lần ở bước cuối, không điều chỉnh gì sau khi xem kết quả")
-        elif DATASET == 'sshar':
-            log.info("Development: chọn checkpoint và báo cáo trên val, không đụng tới test")
+        train_loader = make_loader(train_s, shuffle=True,  device=device, cache_root=cache_root)
+        test_loader  = make_loader(test_s,  shuffle=False, device=device, cache_root=cache_root)
 
         # Kiểm tra 1 batch trước khi train
         t0 = time.time()
-        X_f, X_t, y = next(iter(eval_loader))
+        X_f, X_t, y = next(iter(test_loader))
         log.info(f"Batch mẫu: X_f {tuple(X_f.shape)} [{X_f.min():.3f}, {X_f.max():.3f}] | "
                  f"X_t {tuple(X_t.shape)} [{X_t.min():.3f}, {X_t.max():.3f}] | "
                  f"y {y.tolist()[:8]}... | {time.time() - t0:.1f}s")
@@ -794,22 +659,20 @@ def main():
         for name, m in model.named_children():
             log.info(f"  module {name:<11} {sum(p.numel() for p in m.parameters()):>12,} tham số")
 
-        result = train(model, train_loader, eval_loader,
+        result = train(model, train_loader, test_loader,
                        num_epochs=NUM_EPOCHS, lr=LR,
                        beta1=BETA1, beta2=BETA2, device=device,
                        save_path=run_dir / 'best_model.pth',
                        log_dir=run_dir,
-                       eval_meta=[sample_meta(s) for s in sets[eval_name]],   # cùng thứ tự loader
-                       eval_name=eval_name, final_eval=final_eval,
+                       test_meta=[sample_meta(s) for s in test_s],   # cùng thứ tự test_loader
                        class_names=class_names,
                        amp=AMP, multi_gpu=MULTI_GPU,
                        weight_decay=WEIGHT_DECAY, grad_clip=GRAD_CLIP,
                        time_limit_s=TIME_LIMIT_H * 3600 if TIME_LIMIT_H else None,
                        log_interval=LOG_INTERVAL,
-                       extra_summary={'run_dir': str(run_dir), 'dataset': DATASET,
-                                      'split_by': SPLIT_BY, 'test_values': TEST_VALUES,
-                                      'final_test': FINAL_TEST,
-                                      **{f'n_{n}': len(ss) for n, ss in sets.items()},
+                       extra_summary={'run_dir': str(run_dir), 'split_by': SPLIT_BY,
+                                      'test_values': TEST_VALUES,
+                                      'n_train': len(train_s), 'n_test': len(test_s),
                                       'git_commit': env.get('git_commit')})
 
         # ── Vẽ hình + nén ─────────────────────────────────────────────────
@@ -850,25 +713,18 @@ def _int_or_str(x):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description='Train UniFi trên Widar 3.0 hoặc SSHAR ESP',
+        description='Train UniFi trên Widar 3.0',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     g = p.add_argument_group('dữ liệu / đường dẫn')
-    g.add_argument('--dataset', choices=['widar', 'sshar'], default=DATASET)
-    g.add_argument('--data-root', default=None,
-                   help='widar/ chứa userX/*.dat, hoặc sshar_amp_interp/ chứa room_XX (mặc định: tự tìm)')
+    g.add_argument('--data-root', default=str(DATA_ROOT), help='thư mục widar/ chứa userX/*.dat')
     g.add_argument('--output-dir', default=str(OUTPUT_DIR), help='nơi tạo runs/<tên run>/')
     g.add_argument('--run-name', default=RUN_NAME, help='tên thư mục run (mặc định: thời gian + kiểu chia)')
-    g.add_argument('--users', nargs='+', default=None,
-                   help='Widar: user5 ... | SSHAR: subject_01 ... (mặc định: tất cả)')
-    g.add_argument('--gestures', nargs='+', type=int, default=None,
-                   help='gesture id (Widar) / act id (SSHAR) (mặc định: tất cả)')
+    g.add_argument('--users', nargs='+', default=USERS)
+    g.add_argument('--gestures', nargs='+', type=int, default=GESTURES)
     g.add_argument('--max-samples', type=int, default=MAX_SAMPLES, help='dùng ít mẫu để chạy thử')
 
     g = p.add_argument_group('chia train/test')
-    g.add_argument('--split', choices=['random', 'user', 'location', 'orientation', 'protocol'],
-                   default=None, help='mặc định: random (Widar), protocol (SSHAR)')
-    g.add_argument('--final-test', action='store_true',
-                   help='SSHAR: đánh giá checkpoint tốt nhất (theo val) trên test — chỉ ở bước cuối')
+    g.add_argument('--split', choices=['random', 'user', 'location', 'orientation'], default=SPLIT_BY)
     g.add_argument('--test-values', nargs='*', type=_int_or_str, default=TEST_VALUES,
                    help="ví dụ: --split location --test-values 3 ; --split user --test-values user5")
     g.add_argument('--test-ratio', type=float, default=TEST_RATIO)
@@ -914,28 +770,13 @@ def apply_args(a):
     global TEST_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
     global RX_DIRECTIONS, DFS_HIGHPASS, NUM_WORKERS, AMP, MULTI_GPU, USE_CACHE, CACHE_DIR
     global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY
-    global DATASET, FINAL_TEST, GESTURE_NAMES, V, RX_POS
-    DATASET      = a.dataset
-    FINAL_TEST   = a.final_test
-    if DATASET == 'sshar':
-        DATA_ROOT     = Path(a.data_root) if a.data_root else find_sshar_root()
-        USERS         = a.users or list(SSHAR_SUBJECTS)
-        GESTURES      = a.gestures or list(SSHAR_ACTS)
-        GESTURE_NAMES = {k: f'act{k:02d}' for k in SSHAR_ACTS}
-        V             = len(SSHAR_RX)
-        RX_POS        = None
-        RX_DIRECTIONS = None
-        SPLIT_BY      = a.split or 'protocol'
-    else:
-        if a.final_test:
-            raise SystemExit('--final-test chỉ dùng với --dataset sshar')
-        DATA_ROOT = Path(a.data_root) if a.data_root else find_data_root()
-        USERS     = a.users or USERS
-        GESTURES  = a.gestures or GESTURES
-        SPLIT_BY  = a.split or 'random'
+    DATA_ROOT    = Path(a.data_root)
     OUTPUT_DIR   = Path(a.output_dir)
     RUN_NAME     = a.run_name
+    USERS        = a.users
+    GESTURES     = a.gestures
     MAX_SAMPLES  = a.max_samples
+    SPLIT_BY     = a.split
     TEST_VALUES  = a.test_values
     TEST_RATIO   = a.test_ratio
     SEED         = a.seed
@@ -947,7 +788,7 @@ def apply_args(a):
     WEIGHT_DECAY = a.weight_decay
     GRAD_CLIP    = a.grad_clip
     if a.no_mask:
-        RX_DIRECTIONS = None   # (SSHAR luôn không có mask)
+        RX_DIRECTIONS = None
     DFS_HIGHPASS = not a.no_highpass
     NUM_WORKERS  = a.workers
     AMP          = not a.no_amp

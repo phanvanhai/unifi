@@ -477,19 +477,6 @@ def per_class_acc(res, num_classes):
     return out
 
 
-def macro_prf(cm):
-    """Precision / recall / F1 trung bình macro (lớp không được dự đoán lần nào → precision 0)."""
-    ps, rs, fs = [], [], []
-    for c in range(cm.shape[0]):
-        tp   = cm[c, c]
-        prec = tp / max(cm[:, c].sum(), 1)
-        rec  = tp / max(cm[c].sum(), 1)
-        ps.append(prec)
-        rs.append(rec)
-        fs.append(2 * prec * rec / max(prec + rec, 1e-12))
-    return float(np.mean(ps)), float(np.mean(rs)), float(np.mean(fs))
-
-
 def macro_f1(cm):
     f1s = []
     for c in range(cm.shape[0]):
@@ -517,6 +504,13 @@ def format_confusion(cm, names):
 # =============================================================================
 # Ghi log ra file
 # =============================================================================
+
+HISTORY_COLS = ['epoch', 'lr', 'time_s', 'train_time_s', 'test_time_s',
+                'data_wait_s', 'samples_per_s',
+                'train_loss', 'train_L_global', 'train_L_view', 'train_L_pcon', 'train_acc',
+                'test_loss', 'test_L_global', 'test_L_view', 'test_L_pcon', 'test_acc',
+                'test_macro_f1', 'test_view_acc_mean', 'gpu_max_mem_gb', 'is_best']
+
 
 def save_predictions(path, res, meta=None, class_names=None):
     """
@@ -561,56 +555,39 @@ def save_confusion_matrix(path, y_true, y_pred, num_classes, class_names=None):
     return cm
 
 
-def history_cols(e='test'):
-    """Cột history.csv; e = tên tập dùng chọn checkpoint ('test' Widar, 'val' SSHAR)."""
-    return ['epoch', 'lr', 'time_s', 'train_time_s', f'{e}_time_s',
-            'data_wait_s', 'samples_per_s',
-            'train_loss', 'train_L_global', 'train_L_view', 'train_L_pcon', 'train_acc',
-            f'{e}_loss', f'{e}_L_global', f'{e}_L_view', f'{e}_L_pcon', f'{e}_acc',
-            f'{e}_macro_precision', f'{e}_macro_recall', f'{e}_macro_f1',
-            f'{e}_view_acc_mean', 'gpu_max_mem_gb', 'is_best']
-
-
-HISTORY_COLS = history_cols('test')
-
-
-def metrics_of(res, num_classes, names):
-    """accuracy + precision / recall / F1 macro + acc theo view / lớp."""
-    cm = confusion(res['y_true'], res['y_pred'], num_classes)
-    p, r, f1 = macro_prf(cm)
-    return {'acc': res['acc'], 'macro_precision': p, 'macro_recall': r, 'macro_f1': f1,
-            'n': int(len(res['y_true'])),
-            'view_acc': per_view_acc(res),
-            'class_acc': dict(zip(names, per_class_acc(res, num_classes)))}
-
-
-def train(model, train_loader, eval_loader,
+def train(model, train_loader, test_loader,
           num_epochs=100, lr=0.005,
           beta1=1.0, beta2=0.05, device='cpu',
           save_path='best_model.pth',
-          log_dir=None, eval_meta=None, class_names=None,
+          log_dir=None, test_meta=None, class_names=None,
           amp=False, multi_gpu=False, weight_decay=0.0, grad_clip=None,
-          time_limit_s=None, log_interval=20, extra_summary=None,
-          eval_name='test', final_eval=None):
+          time_limit_s=None, log_interval=20, extra_summary=None):
     """
     Training loop đầy đủ.
 
     Tham số:
         model        : UniFi model
         train_loader : DataLoader cho training set
-        eval_loader  : DataLoader (KHÔNG shuffle) của tập chọn checkpoint (acc cao nhất)
-        eval_name    : tên tập đó: 'test' (Widar, như UniFi) hoặc 'val' (SSHAR protocol)
-        final_eval   : list (tên, loader, meta) đánh giá 1 lần bằng checkpoint tốt nhất
-                       sau khi train xong (SSHAR final test: [('val', ...), ('test', ...)])
-        num_epochs, lr, beta1, beta2 : theo bài báo (100, 0.005, 1.0, 0.05)
+        test_loader  : DataLoader cho test set (KHÔNG shuffle) — chọn checkpoint theo test acc cao nhất
+        num_epochs   : số epoch
+        lr           : learning rate (= 0.005, báo cáo)
+        beta1, beta2 : hệ số loss (= 1.0, 0.05, báo cáo)
+        device       : 'cuda' hoặc 'cpu'
         save_path    : nơi lưu checkpoint tốt nhất
         log_dir      : thư mục ghi log (None → không ghi file). Tạo ra:
-            history.csv                          loss/acc/P/R/F1 mỗi epoch (flush mỗi epoch)
-            <eval>_predictions_best.csv / _last.csv, confusion_matrix_best.csv / _last.csv
-            <tên>_predictions_final.csv, confusion_matrix_<tên>_final.csv   (final_eval)
-            last_model.pth, summary.json
-        eval_meta    : list dict thông tin từng mẫu của eval_loader (cùng thứ tự)
-        amp, multi_gpu, time_limit_s : xem main.py
+            history.csv               loss/acc train + test mỗi epoch (flush mỗi
+                                      epoch → Kaggle bị ngắt vẫn còn log)
+            test_predictions_best.csv  dự đoán từng mẫu test tại epoch tốt nhất
+            test_predictions_last.csv  dự đoán từng mẫu test tại epoch cuối
+            confusion_matrix_best.csv / confusion_matrix_last.csv
+            last_model.pth            checkpoint epoch cuối
+            summary.json              best acc, best epoch, tổng thời gian
+        test_meta    : list dict thông tin từng mẫu test (cùng thứ tự test_loader)
+        class_names  : list tên lớp (ghi kèm vào CSV)
+        amp          : mixed precision fp16 (chỉ có tác dụng trên CUDA)
+        multi_gpu    : bọc DataParallel khi có > 1 GPU (Kaggle T4 x2)
+        time_limit_s : dừng sớm (vẫn ghi đủ kết quả) nếu epoch kế tiếp có thể vượt
+                       giới hạn này — tránh bị Kaggle cắt ngang ở mốc 12 giờ
     """
     if os.environ.get('UNIFI_TRACEMALLOC'):
         import tracemalloc
@@ -619,7 +596,6 @@ def train(model, train_loader, eval_loader,
     model = model.to(device)
     core  = model
     amp   = bool(amp and str(device).startswith('cuda'))
-    E, EN = eval_name, eval_name.capitalize()
 
     if multi_gpu and str(device).startswith('cuda') and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
@@ -628,7 +604,10 @@ def train(model, train_loader, eval_loader,
     num_classes = core.classifier.out_features
     names = class_names or [str(c) for c in range(num_classes)]
 
+    # Proxy contrastive loss
     pcon_loss_fn = ProxyContrastiveLoss(D=core.D, proj_dim=128, tau=0.07).to(device)
+
+    # Adam optimizer — học tất cả parameters của model VÀ pcon
     params = list(core.parameters()) + list(pcon_loss_fn.parameters())
     optimizer = torch.optim.Adam(params, lr=lr, weight_decay=weight_decay)
     scaler = make_grad_scaler(amp)
@@ -637,27 +616,25 @@ def train(model, train_loader, eval_loader,
     n_pcon  = sum(p.numel() for p in pcon_loss_fn.parameters())
     log.info(f"Tham số: model {n_model:,} | pcon head {n_pcon:,} | "
              f"AMP {amp} | lr {lr} | wd {weight_decay} | grad_clip {grad_clip}")
-    log.info(f"Batch/epoch: train {len(train_loader)} | {E} {len(eval_loader)} | "
-             f"chọn checkpoint theo {E} acc")
+    log.info(f"Batch/epoch: train {len(train_loader)} | test {len(test_loader)}")
 
     hist_f = writer = None
     if log_dir is not None:
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         hist_f = open(log_dir / 'history.csv', 'w', newline='', encoding='utf-8')
-        writer = csv.DictWriter(hist_f, fieldnames=history_cols(E))
+        writer = csv.DictWriter(hist_f, fieldnames=HISTORY_COLS)
         writer.writeheader()
         hist_f.flush()
 
-    best_acc    = -1.0
-    best_epoch  = 0
-    best_m      = None
-    epochs_done = 0
-    t_start     = time.time()
-    res         = None
-    epoch_times = []
-    stop_reason = 'completed'
-    summary     = None
+    best_test_acc = -1.0
+    best_epoch    = 0
+    best_f1       = float('nan')
+    epochs_done   = 0
+    t_start       = time.time()
+    res           = None
+    epoch_times   = []
+    stop_reason   = 'completed'
 
     try:
         for epoch in range(1, num_epochs + 1):
@@ -673,11 +650,15 @@ def train(model, train_loader, eval_loader,
             t_train = time.time() - t0
             rss1 = _rss_gb(os.getpid())
 
-            res = evaluate(model, eval_loader, device, pcon_loss_fn, beta1, beta2, amp=amp)
+            # Test (cùng công thức loss để so sánh với train)
+            res = evaluate(model, test_loader, device, pcon_loss_fn, beta1, beta2, amp=amp)
             rss2 = _rss_gb(os.getpid())
-            m   = metrics_of(res, num_classes, names)
+            cm  = confusion(res['y_true'], res['y_pred'], num_classes)
+            f1  = macro_f1(cm)
+            v_acc = per_view_acc(res)
+            c_acc = per_class_acc(res, num_classes)
 
-            is_best = res['acc'] > best_acc
+            is_best = res['acc'] > best_test_acc
             dt = time.time() - t0
             epoch_times.append(dt)
             epochs_done = epoch
@@ -690,14 +671,14 @@ def train(model, train_loader, eval_loader,
                 f"Epoch {epoch:3d}/{num_epochs} | "
                 f"Train loss {tr['loss']:.4f} (G {tr['L_global']:.3f} V {tr['L_view']:.3f} "
                 f"P {tr['L_pcon']:.3f}) acc {tr['acc']:.4f} | "
-                f"{EN} loss {res.get('loss', float('nan')):.4f} acc {res['acc']:.4f} "
-                f"F1 {m['macro_f1']:.4f} | {fmt_time(dt)} (train {fmt_time(t_train)}, "
+                f"Test loss {res.get('loss', float('nan')):.4f} acc {res['acc']:.4f} "
+                f"F1 {f1:.4f} | {fmt_time(dt)} (train {fmt_time(t_train)}, "
                 f"chờ data {fmt_time(tr['time_data_s'])}) | đã chạy {fmt_time(elapsed)}, "
                 f"còn ~{fmt_time(eta)}{ram_str()}" + ("  *best" if is_best else ""))
-            log.info(f"          {E} acc theo view: "
-                     + ' '.join(f"r{v + 1}={a:.3f}" for v, a in enumerate(m['view_acc']))
-                     + " | theo lớp: "
-                     + ' '.join(f"{n}={a:.3f}" for n, a in m['class_acc'].items()))
+            log.info("          test acc theo view: "
+                     + ' '.join(f"r{v + 1}={a:.3f}" for v, a in enumerate(v_acc))
+                     + f" | theo lớp: "
+                     + ' '.join(f"{n}={a:.3f}" for n, a in zip(names, c_acc)))
             if tr['nonfinite']:
                 log.warning(f"          {tr['nonfinite']} batch có loss NaN/Inf đã bị bỏ qua")
             release_host_memory()
@@ -714,7 +695,7 @@ def train(model, train_loader, eval_loader,
                     'lr'            : optimizer.param_groups[0]['lr'],
                     'time_s'        : round(dt, 2),
                     'train_time_s'  : round(t_train, 2),
-                    f'{E}_time_s'   : round(res['time_s'], 2),
+                    'test_time_s'   : round(res['time_s'], 2),
                     'data_wait_s'   : round(tr['time_data_s'], 2),
                     'samples_per_s' : round(tr['samples_per_s'], 2),
                     'train_loss'    : tr['loss'],
@@ -722,30 +703,32 @@ def train(model, train_loader, eval_loader,
                     'train_L_view'  : tr['L_view'],
                     'train_L_pcon'  : tr['L_pcon'],
                     'train_acc'     : tr['acc'],
-                    f'{E}_loss'     : res.get('loss'),
-                    f'{E}_L_global' : res.get('L_global'),
-                    f'{E}_L_view'   : res.get('L_view'),
-                    f'{E}_L_pcon'   : res.get('L_pcon'),
-                    f'{E}_acc'      : res['acc'],
-                    f'{E}_macro_precision': m['macro_precision'],
-                    f'{E}_macro_recall'   : m['macro_recall'],
-                    f'{E}_macro_f1'       : m['macro_f1'],
-                    f'{E}_view_acc_mean'  : float(np.mean(m['view_acc'])),
+                    'test_loss'     : res.get('loss'),
+                    'test_L_global' : res.get('L_global'),
+                    'test_L_view'   : res.get('L_view'),
+                    'test_L_pcon'   : res.get('L_pcon'),
+                    'test_acc'      : res['acc'],
+                    'test_macro_f1' : f1,
+                    'test_view_acc_mean': float(np.mean(v_acc)),
                     'gpu_max_mem_gb': round(gpu_gb, 3),
                     'is_best'       : int(is_best),
                 })
                 hist_f.flush()
 
+            # Lưu model + dự đoán tại epoch có test acc cao nhất
             if is_best:
-                best_acc, best_epoch, best_m = res['acc'], epoch, m
+                best_test_acc = res['acc']
+                best_epoch    = epoch
+                best_f1       = f1
                 torch.save(core.state_dict(), save_path)
                 if log_dir is not None:
-                    save_predictions(log_dir / f'{E}_predictions_best.csv',
-                                     res, eval_meta, class_names)
+                    save_predictions(log_dir / 'test_predictions_best.csv',
+                                     res, test_meta, class_names)
                     save_confusion_matrix(log_dir / 'confusion_matrix_best.csv',
                                           res['y_true'], res['y_pred'],
                                           num_classes, class_names)
 
+            # Dừng sớm nếu epoch kế tiếp có thể vượt giới hạn thời gian
             if time_limit_s and epoch < num_epochs:
                 need = max(epoch_times[-3:]) * 1.15
                 if time.time() - t_start + need > time_limit_s:
@@ -760,67 +743,45 @@ def train(model, train_loader, eval_loader,
         stop_reason = 'error'
         raise
     finally:
+        # Ghi kết quả cả khi bị ngắt giữa chừng (Ctrl+C, hết giờ Kaggle, lỗi...)
         if hist_f is not None:
             hist_f.close()
         if log_dir is not None and res is not None:
             torch.save(core.state_dict(), log_dir / 'last_model.pth')
-            save_predictions(log_dir / f'{E}_predictions_last.csv', res, eval_meta, class_names)
-            save_confusion_matrix(log_dir / 'confusion_matrix_last.csv',
-                                  res['y_true'], res['y_pred'], num_classes, class_names)
+            save_predictions(log_dir / 'test_predictions_last.csv',
+                             res, test_meta, class_names)
+            cm_last = save_confusion_matrix(log_dir / 'confusion_matrix_last.csv',
+                                            res['y_true'], res['y_pred'],
+                                            num_classes, class_names)
             summary = {
-                'stop_reason'      : stop_reason,
-                'eval_name'        : E,
-                'best_epoch'       : best_epoch,
-                f'best_{E}_acc'    : best_acc,
-                f'best_{E}'        : best_m,
-                f'last_{E}'        : metrics_of(res, num_classes, names),
-                'epochs_done'      : epochs_done,
-                'num_epochs'       : num_epochs,
+                'stop_reason'    : stop_reason,
+                'best_test_acc'  : best_test_acc,
+                'best_test_macro_f1': best_f1,
+                'best_epoch'     : best_epoch,
+                'last_test_acc'  : res['acc'],
+                'last_test_macro_f1': macro_f1(cm_last),
+                'last_test_view_acc': per_view_acc(res),
+                'last_test_class_acc': dict(zip(names, per_class_acc(res, num_classes))),
+                'epochs_done'    : epochs_done,
+                'num_epochs'     : num_epochs,
                 'mean_epoch_time_s': round(float(np.mean(epoch_times)), 1) if epoch_times else None,
-                'total_time_s'     : round(time.time() - t_start, 1),
-                'best_model_path'  : str(save_path),
+                'total_time_s'   : round(time.time() - t_start, 1),
+                'best_model_path': str(save_path),
             }
             if extra_summary:
                 summary.update(extra_summary)
             with open(log_dir / 'summary.json', 'w', encoding='utf-8') as f:
                 json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    log.info(f"Best {E} acc: {best_acc:.4f} tại epoch {best_epoch}"
-             + (f" | P {best_m['macro_precision']:.4f} R {best_m['macro_recall']:.4f} "
-                f"F1 {best_m['macro_f1']:.4f} (macro)" if best_m else "")
-             + f" | dừng: {stop_reason} | tổng {fmt_time(time.time() - t_start)}")
+    log.info(f"Best test acc: {best_test_acc:.4f} (macro F1 {best_f1:.4f}) tại epoch {best_epoch}"
+             f" | dừng: {stop_reason} | tổng {fmt_time(time.time() - t_start)}")
     if res is not None:
-        log.info(f"Confusion matrix {E} (epoch cuối, hàng = thật, cột = dự đoán):\n"
+        log.info("Confusion matrix (epoch cuối, hàng = thật, cột = dự đoán):\n"
                  + format_confusion(confusion(res['y_true'], res['y_pred'], num_classes), names))
-
-    # ── Đánh giá cuối bằng checkpoint tốt nhất (SSHAR final test) ─────────
-    final = {}
-    if final_eval and best_epoch > 0:
-        core.load_state_dict(torch.load(save_path, map_location=device))
-        log.info(f"Đánh giá cuối: checkpoint epoch {best_epoch} (chọn theo {E} acc)")
-        for name, loader, meta in final_eval:
-            r  = evaluate(model, loader, device, amp=amp)
-            fm = metrics_of(r, num_classes, names)
-            final[name] = fm
-            log.info(f"  [final] {name:<5} acc {fm['acc']:.4f} | P {fm['macro_precision']:.4f} "
-                     f"R {fm['macro_recall']:.4f} F1 {fm['macro_f1']:.4f} (macro, {fm['n']} mẫu)")
-            log.info("          theo lớp: "
-                     + ' '.join(f"{n}={a:.3f}" for n, a in fm['class_acc'].items()))
-            if log_dir is not None:
-                save_predictions(log_dir / f'{name}_predictions_final.csv', r, meta, class_names)
-                cm = save_confusion_matrix(log_dir / f'confusion_matrix_{name}_final.csv',
-                                           r['y_true'], r['y_pred'], num_classes, class_names)
-                log.info(f"  Confusion matrix {name} (final):\n" + format_confusion(cm, names))
-        if summary is not None:
-            summary['final'] = final
-            with open(log_dir / 'summary.json', 'w', encoding='utf-8') as f:
-                json.dump(summary, f, indent=2, ensure_ascii=False)
-
     log.info(f"Model tốt nhất: {save_path}")
     if log_dir is not None:
         log.info(f"Log + kết quả: {log_dir}")
-    return {f'best_{E}_acc': best_acc, 'best_epoch': best_epoch, 'stop_reason': stop_reason,
-            'best': best_m, 'final': final}
+    return {'best_test_acc': best_test_acc, 'best_epoch': best_epoch, 'stop_reason': stop_reason}
 
 
 # =============================================================================
