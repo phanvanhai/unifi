@@ -135,6 +135,7 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--output-dir` | `OUTPUT_DIR` | Nơi tạo `runs/` (Kaggle: `/kaggle/working`) |
 | `--users`, `--gestures` | `USERS`, `GESTURES` | User và gesture id được dùng (nhãn = vị trí trong list) |
 | `--split`, `--test-values`, `--test-ratio` | `SPLIT_BY`, `TEST_VALUES`, `TEST_RATIO` | `random` (in-domain, 20% test) / `user` / `location` / `orientation` |
+| `--val-ratio` | `VAL_RATIO` | Tỉ lệ val tách từ phần train, mỗi lớp (mặc định 0.1; `0` = không val, chọn checkpoint theo test như bản cũ) |
 | `--epochs`, `--batch-size`, `--lr`, `--beta1`, `--beta2` | | Theo bài báo: 100*, 32, 0.005, 1.0, 0.05 (*bài không nêu số epoch) |
 | `--weight-decay`, `--grad-clip` | | Không có trong bài, mặc định tắt |
 | `--no-mask`, `--no-highpass` | | Tắt spatial mask / tắt lọc thông cao 2 Hz trước DFS |
@@ -146,7 +147,9 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--max-samples` | `MAX_SAMPLES` | Chỉ lấy N mẫu, chia đều theo lớp, để chạy thử |
 | `--run-name`, `--log-interval`, `--no-plots`, `--zip/--no-zip` | | Tên run, tần suất log, vẽ hình, nén run |
 
-**Chia dữ liệu:** chỉ có train và test, như bài UniFi và WiGRUNT. Checkpoint được chọn theo **test accuracy cao nhất**, nên con số này hơi lạc quan. Kết quả của epoch cuối (`*_last`) vẫn được lưu song song để báo cáo.
+**Chia dữ liệu (train / val / test):** theo bài UniFi (mục 6.1): in-domain lấy ngẫu nhiên 80% làm *training and validation set*, 20% làm test (6,750 mẫu → 5,400 / 1,350); cross-location / cross-orientation lấy 4 location/orientation làm train+val, 1 làm test. Bài không nêu tỉ lệ val, nên code tách **10% của phần train+val** (mỗi lớp) làm val: in-domain thành **72 / 8 / 20** (~4,855 / 540 / 1,345 mẫu sau khi bỏ mẫu lỗi). Tập test không đổi so với khi không có val.
+
+Checkpoint được chọn theo **val accuracy cao nhất**; sau khi train xong, checkpoint đó được đánh giá **một lần** trên val và test (`summary.json` → `final.test`: accuracy, precision / recall / F1 macro). `--val-ratio 0` trở về cách cũ: chọn checkpoint theo test acc (lạc quan, chỉ để so sánh với các run cũ).
 
 Biến môi trường (không bắt buộc): `UNIFI_DATA_ROOT`, `UNIFI_OUTPUT_DIR`.
 
@@ -160,13 +163,13 @@ Mỗi lần chạy tạo thư mục `runs/<ngày_giờ>_<kiểu chia>/`, ví d�
 |---|---|
 | `train.log` | Toàn bộ nội dung in ra console |
 | `config.json` | Cấu hình, môi trường (GPU, git commit, lệnh chạy), spatial mask, số mẫu train/test |
-| `split.csv` | Mẫu nào thuộc train, mẫu nào thuộc test (kèm user/location/orientation) |
-| `history.csv` | Mỗi epoch: train/test loss (tổng, G, V, P), acc, macro-F1, acc TB các view, lr, thời gian, thời gian chờ data, mẫu/s, VRAM |
-| `test_predictions_best.csv` | Từng mẫu test tại epoch tốt nhất: nhãn, dự đoán, dự đoán của từng view, xác suất |
-| `test_predictions_last.csv` | Như trên, tại epoch cuối |
-| `confusion_matrix_best.csv`, `confusion_matrix_last.csv` | Ma trận nhầm lẫn |
+| `split.csv` | Mẫu nào thuộc train / val / test (kèm user/location/orientation) |
+| `history.csv` | Mỗi epoch: train/val loss (tổng, G, V, P), acc, precision / recall / F1 macro, acc TB các view, lr, thời gian, thời gian chờ data, mẫu/s, VRAM |
+| `val_predictions_best.csv` / `_last.csv` | Từng mẫu val tại epoch tốt nhất / epoch cuối: nhãn, dự đoán, dự đoán của từng view, xác suất |
+| `test_predictions_final.csv`, `val_predictions_final.csv` | Dự đoán của checkpoint tốt nhất (theo val) trên test / val |
+| `confusion_matrix_best.csv`, `_last.csv`, `confusion_matrix_test_final.csv`, `confusion_matrix_val_final.csv` | Ma trận nhầm lẫn |
 | `best_model.pth`, `last_model.pth` | Checkpoint |
-| `summary.json` | Best/last test acc + macro-F1, acc theo view/lớp, best epoch, lý do dừng, tổng thời gian, git commit |
+| `summary.json` | `best_val` / `last_val` (acc, P/R/F1 macro, acc theo view/lớp), `final.val` / `final.test` (checkpoint tốt nhất), best epoch, lý do dừng, thời gian, git commit |
 | `<run>.zip` | Toàn bộ thư mục run nén lại (mặc định trên Kaggle) |
 | `plots/` | Hình do `plot_logs.py` tạo: loss, acc, confusion matrix, acc theo view/location/orientation, `report.txt` (precision/recall/F1) |
 

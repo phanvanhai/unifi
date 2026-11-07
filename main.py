@@ -119,14 +119,20 @@ V         = 6                  # số bộ thu
 # Lưu ý: ở Widar 3.0 ý nghĩa gesture id khác nhau theo ngày thu — điền theo đúng ngày.
 GESTURE_NAMES = {1: 'Push&Pull', 2: 'Sweep', 3: 'Clap', 4: 'Slide', 5: 'Draw-O', 6: 'Draw-Zigzag'}
 
-# Chia 2 tập train/test (như UniFi, WiGRUNT). Checkpoint lấy theo test acc cao nhất.
-#   'random'      : chia ngẫu nhiên theo TEST_RATIO (in-domain)
+# Chia train / val / test.
+# UniFi (mục 6.1): in-domain lấy ngẫu nhiên 80% làm "training and validation set",
+# 20% làm test; cross-location/orientation: 4 location/orientation làm train+val,
+# 1 làm test. Bài không nêu tỉ lệ val → VAL_RATIO = 10% của phần train+val
+# (in-domain: 72 / 8 / 20). Checkpoint chọn theo val acc; test chỉ đánh giá 1 lần
+# bằng checkpoint đó sau khi train xong. VAL_RATIO = 0 → như cũ (chọn theo test).
+#   'random'      : test = TEST_RATIO ngẫu nhiên (in-domain)
 #   'user'        : TEST_VALUES là list user để test   (cross-user)
 #   'location'    : TEST_VALUES là list vị trí torso   (cross-location)
 #   'orientation' : TEST_VALUES là list hướng mặt      (cross-orientation)
 SPLIT_BY    = 'random'
 TEST_VALUES = []
 TEST_RATIO  = 0.2
+VAL_RATIO   = 0.1
 
 # Tọa độ (m) theo sơ đồ Widar 3.0: gốc tại Tx, x sang trái, y xuống dưới
 # Vùng cảm biến 2m × 2m: x ∈ [0, 2], y ∈ [0, 2]
@@ -372,7 +378,31 @@ def subsample(samples, n, seed):
     return out
 
 
+def _stratified_take(samples, ratio, seed):
+    """Tách ngẫu nhiên `ratio` mẫu của MỖI lớp → (phần còn lại, phần tách ra)."""
+    rng = random.Random(seed)
+    rest, taken = [], []
+    for c in sorted({s['label'] for s in samples}):
+        cls = [s for s in samples if s['label'] == c]
+        rng.shuffle(cls)
+        n = int(round(len(cls) * ratio))
+        if n == 0 and len(cls) > 1 and ratio > 0:
+            n = 1   # lớp quá ít mẫu (chạy thử --max-samples) vẫn có 1 mẫu
+        taken += cls[:n]
+        rest  += cls[n:]
+    return rest, taken
+
+
 def split_samples(samples):
+    """dict tên tập → list mẫu: {'train', 'val', 'test'} (VAL_RATIO > 0) hoặc {'train', 'test'}."""
+    train_s, test_s = _split_train_test(samples)
+    if VAL_RATIO <= 0:
+        return {'train': train_s, 'test': test_s}
+    train_s, val_s = _stratified_take(train_s, VAL_RATIO, SEED + 1)
+    return {'train': train_s, 'val': val_s, 'test': test_s}
+
+
+def _split_train_test(samples):
     if SPLIT_BY == 'random':
         # Chia đều theo từng lớp để test có đủ mọi cử chỉ
         rng = random.Random(SEED)
@@ -506,15 +536,16 @@ def sample_meta(s):
     }
 
 
-def log_split_stats(train_s, test_s, class_names):
-    """In phân bố mẫu train/test theo lớp, user, location, orientation."""
+def log_split_stats(sets, class_names):
+    """In phân bố mẫu các tập theo lớp, user, location, orientation."""
+    tag = '/'.join(sets)
     for key in ('label', 'user', 'location', 'orientation'):
-        tr = Counter(s[key] for s in train_s)
-        te = Counter(s[key] for s in test_s)
-        keys = sorted(set(tr) | set(te), key=lambda x: (len(str(x)), str(x)))
+        cnt  = {n: Counter(s[key] for s in ss) for n, ss in sets.items()}
+        keys = sorted(set().union(*cnt.values()), key=lambda x: (len(str(x)), str(x)))
         name = (lambda k: class_names[k]) if key == 'label' else str
-        log.info(f"  theo {key:<11}: " + ' | '.join(f"{name(k)} {tr[k]}/{te[k]}" for k in keys)
-                 + "   (train/test)")
+        log.info(f"  theo {key:<11}: "
+                 + ' | '.join(f"{name(k)} " + '/'.join(str(c[k]) for c in cnt.values()) for k in keys)
+                 + f"   ({tag})")
 
 
 def config_dict():
@@ -527,6 +558,7 @@ def config_dict():
         'split_by'    : SPLIT_BY,
         'test_values' : TEST_VALUES,
         'test_ratio'  : TEST_RATIO,
+        'val_ratio'   : VAL_RATIO,
         'rx_pos'      : RX_POS,
         'use_mask'    : RX_DIRECTIONS is not None,
         'D'           : D,
@@ -553,10 +585,10 @@ def config_dict():
     }
 
 
-def save_run_info(run_dir, env, train_s, test_s, class_names, mask):
-    """config.json (siêu tham số + môi trường) và split.csv (mẫu nào thuộc train/test)."""
+def save_run_info(run_dir, env, sets, class_names, mask):
+    """config.json (siêu tham số + môi trường) và split.csv (mẫu nào thuộc tập nào)."""
     config = {'run_name': run_dir.name, **config_dict(), 'class_names': class_names,
-              'n_train': len(train_s), 'n_test': len(test_s),
+              **{f'n_{n}': len(ss) for n, ss in sets.items()},
               'spatial_mask': None if mask is None else
               [[0 if x == 0 else '-inf' for x in row] for row in mask.tolist()],
               'env': env, 'cmdline': sys.argv}
@@ -566,7 +598,7 @@ def save_run_info(run_dir, env, train_s, test_s, class_names, mask):
     with open(run_dir / 'split.csv', 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(['set', 'sample', 'user', 'location', 'orientation', 'label', 'class_name'])
-        for name, ss in (('train', train_s), ('test', test_s)):
+        for name, ss in sets.items():
             for s in ss:
                 m = sample_meta(s)
                 w.writerow([name, m['sample'], m['user'], m['location'], m['orientation'],
@@ -617,11 +649,12 @@ def main():
             samples = subsample(samples, MAX_SAMPLES, SEED)
             log.warning(f"--max-samples: chỉ dùng {len(samples)} mẫu (chạy thử)")
 
-        train_s, test_s = split_samples(samples)
-        if not train_s or not test_s:
-            raise RuntimeError(f"Tập rỗng: train={len(train_s)}, test={len(test_s)} — kiểm tra SPLIT_BY/TEST_VALUES")
-        log.info(f"Train: {len(train_s)} mẫu | Test: {len(test_s)} mẫu")
-        log_split_stats(train_s, test_s, class_names)
+        sets = split_samples(samples)
+        empty = [n for n, ss in sets.items() if not ss]
+        if empty:
+            raise RuntimeError(f"Tập rỗng: {empty} — kiểm tra SPLIT_BY/TEST_VALUES/VAL_RATIO")
+        log.info(' | '.join(f"{n.capitalize()}: {len(ss)} mẫu" for n, ss in sets.items()))
+        log_split_stats(sets, class_names)
 
         Mask = build_spatial_mask(V, RX_DIRECTIONS) if RX_DIRECTIONS is not None else None
         if Mask is not None:
@@ -629,13 +662,13 @@ def main():
                      '\n'.join('    r%d: ' % (i + 1) + ' '.join('1' if x == 0 else '.' for x in row)
                                for i, row in enumerate(Mask.tolist())))
 
-        save_run_info(run_dir, env, train_s, test_s, class_names, Mask)
+        save_run_info(run_dir, env, sets, class_names, Mask)
 
         # ── Cache tiền xử lý ──────────────────────────────────────────────
         cache_root = None
         if USE_CACHE:
             # sắp theo id → khoá cache không phụ thuộc cách chia train/test (dùng chung giữa các run)
-            used = sorted(train_s + test_s, key=lambda s: s['id'])
+            used = sorted((s for ss in sets.values() for s in ss), key=lambda s: s['id'])
             cache_root = build_or_load_cache(
                 used, [s['id'] for s in used], load_view, prep_params(), CACHE_DIR,
                 num_workers=NUM_WORKERS, search_dirs=CACHE_SEARCH)
@@ -646,12 +679,23 @@ def main():
         else:
             log.info("Không dùng cache: đọc .dat + STFT mỗi epoch (chậm)")
 
-        train_loader = make_loader(train_s, shuffle=True,  device=device, cache_root=cache_root)
-        test_loader  = make_loader(test_s,  shuffle=False, device=device, cache_root=cache_root)
+        # Có val: chọn checkpoint theo val, cuối cùng đánh giá checkpoint đó trên val + test.
+        # Không val (--val-ratio 0): chọn theo test như cũ (lạc quan).
+        eval_name    = 'val' if 'val' in sets else 'test'
+        train_loader = make_loader(sets['train'], shuffle=True, device=device, cache_root=cache_root)
+        eval_loader  = make_loader(sets[eval_name], shuffle=False, device=device, cache_root=cache_root)
+        final_eval   = None
+        if eval_name == 'val':
+            test_loader = make_loader(sets['test'], shuffle=False, device=device, cache_root=cache_root)
+            final_eval  = [('val',  eval_loader, [sample_meta(s) for s in sets['val']]),
+                           ('test', test_loader, [sample_meta(s) for s in sets['test']])]
+            log.info("Chọn checkpoint theo val acc; test chỉ đánh giá 1 lần bằng checkpoint đó sau khi train")
+        else:
+            log.warning("--val-ratio 0: chọn checkpoint theo TEST acc (kết quả lạc quan)")
 
         # Kiểm tra 1 batch trước khi train
         t0 = time.time()
-        X_f, X_t, y = next(iter(test_loader))
+        X_f, X_t, y = next(iter(eval_loader))
         log.info(f"Batch mẫu: X_f {tuple(X_f.shape)} [{X_f.min():.3f}, {X_f.max():.3f}] | "
                  f"X_t {tuple(X_t.shape)} [{X_t.min():.3f}, {X_t.max():.3f}] | "
                  f"y {y.tolist()[:8]}... | {time.time() - t0:.1f}s")
@@ -661,20 +705,21 @@ def main():
         for name, m in model.named_children():
             log.info(f"  module {name:<11} {sum(p.numel() for p in m.parameters()):>12,} tham số")
 
-        result = train(model, train_loader, test_loader,
+        result = train(model, train_loader, eval_loader,
                        num_epochs=NUM_EPOCHS, lr=LR,
                        beta1=BETA1, beta2=BETA2, device=device,
                        save_path=run_dir / 'best_model.pth',
                        log_dir=run_dir,
-                       test_meta=[sample_meta(s) for s in test_s],   # cùng thứ tự test_loader
+                       eval_meta=[sample_meta(s) for s in sets[eval_name]],   # cùng thứ tự loader
+                       eval_name=eval_name, final_eval=final_eval,
                        class_names=class_names,
                        amp=AMP, multi_gpu=MULTI_GPU,
                        weight_decay=WEIGHT_DECAY, grad_clip=GRAD_CLIP,
                        time_limit_s=TIME_LIMIT_H * 3600 if TIME_LIMIT_H else None,
                        log_interval=LOG_INTERVAL,
                        extra_summary={'run_dir': str(run_dir), 'split_by': SPLIT_BY,
-                                      'test_values': TEST_VALUES,
-                                      'n_train': len(train_s), 'n_test': len(test_s),
+                                      'test_values': TEST_VALUES, 'val_ratio': VAL_RATIO,
+                                      **{f'n_{n}': len(ss) for n, ss in sets.items()},
                                       'git_commit': env.get('git_commit')})
 
         # ── Vẽ hình + nén ─────────────────────────────────────────────────
@@ -730,6 +775,8 @@ def parse_args(argv=None):
     g.add_argument('--test-values', nargs='*', type=_int_or_str, default=TEST_VALUES,
                    help="ví dụ: --split location --test-values 3 ; --split user --test-values user5")
     g.add_argument('--test-ratio', type=float, default=TEST_RATIO)
+    g.add_argument('--val-ratio', type=float, default=VAL_RATIO,
+                   help='tỉ lệ val tách từ phần train (mỗi lớp); 0 = không val, chọn theo test')
     g.add_argument('--seed', type=int, default=SEED)
 
     g = p.add_argument_group('huấn luyện')
@@ -771,7 +818,7 @@ def parse_args(argv=None):
 def apply_args(a):
     """Ghi đè biến cấu hình của module theo tham số dòng lệnh."""
     global DATA_ROOT, OUTPUT_DIR, RUN_NAME, USERS, GESTURES, MAX_SAMPLES, SPLIT_BY, TEST_VALUES
-    global TEST_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
+    global TEST_RATIO, VAL_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
     global RX_DIRECTIONS, DFS_HIGHPASS, NUM_WORKERS, AMP, MULTI_GPU, USE_CACHE, CACHE_DIR
     global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY
     DATA_ROOT    = Path(a.data_root)
@@ -783,6 +830,7 @@ def apply_args(a):
     SPLIT_BY     = a.split
     TEST_VALUES  = a.test_values
     TEST_RATIO   = a.test_ratio
+    VAL_RATIO    = a.val_ratio
     SEED         = a.seed
     NUM_EPOCHS   = a.epochs
     BATCH_SIZE   = a.batch_size

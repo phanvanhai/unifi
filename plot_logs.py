@@ -4,7 +4,7 @@ Vẽ kết quả training từ thư mục log do main.py tạo ra.
     python plot_logs.py                      # run mới nhất trong <OUTPUT_DIR>/runs
     python plot_logs.py runs/20261104_...    # một run cụ thể
 
-Đọc : history.csv, test_predictions_best.csv, config.json
+Đọc : history.csv, <test|val>_predictions_best.csv, config.json
 Ghi : <run_dir>/plots/
     curves_loss.png        loss tổng train/test + từng thành phần (G, V, P)
     curves_acc.png         accuracy train/test, đánh dấu epoch tốt nhất
@@ -33,14 +33,14 @@ def col(rows, key):
     return np.array([float(r[key]) if r[key] not in ('', 'None') else np.nan for r in rows])
 
 
-def plot_curves(hist, out):
+def plot_curves(hist, out, e='test'):
     ep = col(hist, 'epoch')
 
     fig, axes = plt.subplots(1, 4, figsize=(20, 4))
     for ax, (key, title) in zip(axes, [('loss', 'Loss tổng'), ('L_global', 'L_global'),
                                       ('L_view', 'L_view (tổng V view)'), ('L_pcon', 'L_pcon')]):
         ax.plot(ep, col(hist, f'train_{key}'), label='train')
-        ax.plot(ep, col(hist, f'test_{key}'),   label='test')
+        ax.plot(ep, col(hist, f'{e}_{key}'),   label=e)
         ax.set(title=title, xlabel='Epoch')
         ax.grid(alpha=.3)
         ax.legend()
@@ -48,12 +48,13 @@ def plot_curves(hist, out):
     fig.savefig(out / 'curves_loss.png', dpi=120)
     plt.close(fig)
 
-    best = int(np.nanargmax(col(hist, 'test_acc')))
+    acc  = col(hist, f'{e}_acc')
+    best = int(np.nanargmax(acc))
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(ep, col(hist, 'train_acc'), label='train')
-    ax.plot(ep, col(hist, 'test_acc'),   label='test')
-    ax.scatter(ep[best], col(hist, 'test_acc')[best], color='red', zorder=3,
-               label=f'best {col(hist, "test_acc")[best]:.4f} @ {int(ep[best])}')
+    ax.plot(ep, acc, label=e)
+    ax.scatter(ep[best], acc[best], color='red', zorder=3,
+               label=f'best {e} {acc[best]:.4f} @ {int(ep[best])}')
     ax.set(title='Accuracy', xlabel='Epoch', ylim=(0, 1.02))
     ax.grid(alpha=.3)
     ax.legend()
@@ -146,10 +147,11 @@ def main(run_dir):
     names = cfg.get('class_names') or [f'g{g}' for g in cfg['gestures']]
 
     hist = read_csv(run_dir / 'history.csv')
+    e = 'val' if hist and 'val_acc' in hist[0] else 'test'   # tập chọn checkpoint
     if hist:
-        plot_curves(hist, out)
+        plot_curves(hist, out, e)
 
-    pred_file = run_dir / 'test_predictions_best.csv'
+    pred_file = run_dir / f'{e}_predictions_best.csv'
     if pred_file.exists():
         preds  = read_csv(pred_file)
         y_true = col(preds, 'y_true').astype(int)
