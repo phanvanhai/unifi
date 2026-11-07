@@ -203,7 +203,9 @@ DFS_HIGHPASS = True
 
 # Tốc độ / môi trường
 AMP          = True       # mixed precision fp16 trên GPU (nhanh ~2×, ít VRAM)
-MULTI_GPU    = True       # DataParallel khi có > 1 GPU (Kaggle T4 x2)
+# DataParallel (2 GPU): leak ~0.9 MB RAM/batch ở tiến trình chính (~0.2 GB/epoch, đo trên
+# Kaggle T4 x2) và còn chậm hơn 1 GPU (31 vs 50 mẫu/s, model nhỏ + batch 32) → mặc định tắt
+MULTI_GPU    = False
 USE_CACHE    = True       # cache bản đồ DFS/pha (xem unifi_cache.py)
 CACHE_DIR    = Path('/tmp/unifi_cache') if IS_KAGGLE else CODE_DIR / 'cache'
 # Nơi tìm cache build sẵn (vd. Kaggle Dataset tạo từ output của --cache-only)
@@ -888,7 +890,9 @@ def parse_args(argv=None):
     g = p.add_argument_group('tốc độ / môi trường')
     g.add_argument('--workers', type=int, default=NUM_WORKERS)
     g.add_argument('--no-amp', action='store_true', help='tắt mixed precision')
-    g.add_argument('--single-gpu', action='store_true', help='không dùng DataParallel')
+    g.add_argument('--multi-gpu', action='store_true',
+                   help='DataParallel trên mọi GPU (leak RAM ~0.2 GB/epoch, chậm hơn 1 GPU)')
+    g.add_argument('--single-gpu', action='store_true', help='(mặc định, giữ để tương thích)')
     g.add_argument('--no-cache', action='store_true', help='không cache tiền xử lý')
     g.add_argument('--cache-dir', default=str(CACHE_DIR), help='nơi ghi cache (build mới)')
     g.add_argument('--cache-search', nargs='*', default=[str(d) for d in CACHE_SEARCH],
@@ -951,7 +955,7 @@ def apply_args(a):
     DFS_HIGHPASS = not a.no_highpass
     NUM_WORKERS  = a.workers
     AMP          = not a.no_amp
-    MULTI_GPU    = not a.single_gpu
+    MULTI_GPU    = a.multi_gpu and not a.single_gpu
     USE_CACHE    = not a.no_cache
     CACHE_DIR    = Path(a.cache_dir)
     CACHE_SEARCH = [Path(d) for d in a.cache_search]
