@@ -143,13 +143,14 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--no-amp`, `--multi-gpu`, `--no-cache`, `--cache-dir` | | Tốc độ, xem mục 3 |
 | `--cache-only` | `CACHE_ONLY` | Chỉ build cache rồi thoát (để tạo Kaggle Dataset) |
 | `--cache-search` | `CACHE_SEARCH` | Thư mục tìm cache build sẵn, chỉ đọc (Kaggle: `/kaggle/input`) |
+| `--patience` | `PATIENCE` | Early stopping theo val acc: dừng khi 10 epoch liên tiếp không có val acc mới cao nhất (`0` = tắt; không có trong bài UniFi) |
 | `--time-limit-hours` | `TIME_LIMIT_H` | Dừng sớm và vẫn ghi kết quả (Kaggle: 11.5, `0` = không giới hạn) |
 | `--max-samples` | `MAX_SAMPLES` | Chỉ lấy N mẫu, chia đều theo lớp, để chạy thử |
 | `--run-name`, `--log-interval`, `--no-plots`, `--zip/--no-zip` | | Tên run, tần suất log, vẽ hình, nén run |
 
 **Chia dữ liệu (train / val / test):** theo bài UniFi (mục 6.1): in-domain lấy ngẫu nhiên 80% làm *training and validation set*, 20% làm test (6,750 mẫu → 5,400 / 1,350); cross-location / cross-orientation lấy 4 location/orientation làm train+val, 1 làm test. Bài không nêu tỉ lệ val, nên code tách **10% của phần train+val** (mỗi lớp) làm val: in-domain thành **72 / 8 / 20** (~4,855 / 540 / 1,345 mẫu sau khi bỏ mẫu lỗi). Tập test không đổi so với khi không có val.
 
-Checkpoint được chọn theo **val accuracy cao nhất**; sau khi train xong, checkpoint đó được đánh giá **một lần** trên val và test (`summary.json` → `final.test`: accuracy, precision / recall / F1 macro). `--val-ratio 0` trở về cách cũ: chọn checkpoint theo test acc (lạc quan, chỉ để so sánh với các run cũ).
+Checkpoint được chọn theo **val accuracy cao nhất**; sau khi train xong, checkpoint đó được đánh giá **một lần** trên val và test (`summary.json` → `final.test`: accuracy, precision / recall / F1 macro). Early stopping (`--patience 10`, mặc định) theo dõi cùng val acc này và dừng khi 10 epoch liên tiếp không có giá trị mới cao nhất; `summary.json` ghi `stop_reason: early_stop`. `--val-ratio 0` trở về cách cũ: chọn checkpoint theo test acc (lạc quan, chỉ để so sánh với các run cũ).
 
 Biến môi trường (không bắt buộc): `UNIFI_DATA_ROOT`, `UNIFI_OUTPUT_DIR`.
 

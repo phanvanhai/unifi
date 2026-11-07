@@ -184,6 +184,9 @@ CACHE_ONLY   = False      # chỉ build cache rồi thoát (không train)
 PIN_MEMORY   = False      # tắt: nghi gây leak RAM ~0.2 GB/epoch ở tiến trình chính (DataParallel + AMP)
 MAX_SAMPLES  = None       # giới hạn số mẫu (chạy thử nhanh), None = tất cả
 TIME_LIMIT_H = 11.5 if IS_KAGGLE else None   # Kaggle cắt phiên ở 12 giờ
+# Early stopping theo val acc (không có trong bài UniFi): dừng khi PATIENCE epoch liên tiếp
+# không có val acc mới cao nhất; checkpoint tốt nhất vẫn là epoch có val acc cao nhất. 0 = tắt
+PATIENCE     = 10
 LOG_INTERVAL = 20         # in tiến độ mỗi N batch (0 = tắt)
 RUN_NAME     = None       # tên thư mục run (None → <thời gian>_<kiểu chia>)
 MAKE_PLOTS   = True       # vẽ hình (plot_logs.py) khi train xong
@@ -582,6 +585,7 @@ def config_dict():
         'num_workers' : NUM_WORKERS,
         'max_samples' : MAX_SAMPLES,
         'time_limit_h': TIME_LIMIT_H,
+        'patience'    : PATIENCE,
     }
 
 
@@ -716,7 +720,7 @@ def main():
                        amp=AMP, multi_gpu=MULTI_GPU,
                        weight_decay=WEIGHT_DECAY, grad_clip=GRAD_CLIP,
                        time_limit_s=TIME_LIMIT_H * 3600 if TIME_LIMIT_H else None,
-                       log_interval=LOG_INTERVAL,
+                       log_interval=LOG_INTERVAL, patience=PATIENCE,
                        extra_summary={'run_dir': str(run_dir), 'split_by': SPLIT_BY,
                                       'test_values': TEST_VALUES, 'val_ratio': VAL_RATIO,
                                       **{f'n_{n}': len(ss) for n, ss in sets.items()},
@@ -805,6 +809,8 @@ def parse_args(argv=None):
                    help='tracemalloc: in dòng code Python giữ thêm RAM mỗi epoch (chậm hơn chút)')
     g.add_argument('--cache-only', action='store_true',
                    help='chỉ build cache rồi thoát; dùng với --cache-dir /kaggle/working/unifi_cache')
+    g.add_argument('--patience', type=int, default=PATIENCE,
+                   help='early stopping: số epoch không cải thiện val acc trước khi dừng (0 = tắt)')
     g.add_argument('--time-limit-hours', type=float, default=TIME_LIMIT_H,
                    help='dừng sớm (vẫn ghi kết quả) trước giới hạn này; 0 = không giới hạn')
     g.add_argument('--log-interval', type=int, default=LOG_INTERVAL)
@@ -820,7 +826,7 @@ def apply_args(a):
     global DATA_ROOT, OUTPUT_DIR, RUN_NAME, USERS, GESTURES, MAX_SAMPLES, SPLIT_BY, TEST_VALUES
     global TEST_RATIO, VAL_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
     global RX_DIRECTIONS, DFS_HIGHPASS, NUM_WORKERS, AMP, MULTI_GPU, USE_CACHE, CACHE_DIR
-    global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY
+    global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY, PATIENCE
     DATA_ROOT    = Path(a.data_root)
     OUTPUT_DIR   = Path(a.output_dir)
     RUN_NAME     = a.run_name
@@ -855,6 +861,7 @@ def apply_args(a):
     if CACHE_ONLY and not USE_CACHE:
         raise SystemExit('--cache-only không đi cùng --no-cache')
     TIME_LIMIT_H = a.time_limit_hours or None
+    PATIENCE     = a.patience
     LOG_INTERVAL = a.log_interval
     MAKE_PLOTS   = not a.no_plots
     ZIP_RUN      = a.zip_run
