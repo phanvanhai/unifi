@@ -414,17 +414,19 @@ def make_loader(samples, shuffle, device, cache_root=None):
     else:
         ds = WiDarDataset(LazyCSIList([s['paths'] for s in samples]), labels,
                           highpass=DFS_HIGHPASS)
+    # Test: 2 worker, không pin_memory. Worker phải persistent: tạo lại DataLoader
+    # mỗi epoch = 1 thread pin_memory mới gọi CUDA → leak ~0.2 GB RAM/epoch ở
+    # tiến trình chính (đo trên Kaggle). Test chỉ 43 batch nên bỏ pin không đáng kể.
+    nw = NUM_WORKERS if shuffle else min(2, NUM_WORKERS)
     return DataLoader(
         ds,
         batch_size=BATCH_SIZE,
         shuffle=shuffle,
         drop_last=shuffle and len(ds) > BATCH_SIZE,   # train: bỏ batch lẻ cuối (BN + contrastive)
-        num_workers=NUM_WORKERS,
-        pin_memory=(device == 'cuda'),
-        # Chỉ giữ worker của train; worker test tạo lại mỗi lần evaluate
-        # (vài giây) để không chiếm RAM suốt lúc train
-        persistent_workers=shuffle and NUM_WORKERS > 0,
-        prefetch_factor=2 if NUM_WORKERS > 0 else None,
+        num_workers=nw,
+        pin_memory=shuffle and device == 'cuda',
+        persistent_workers=nw > 0,
+        prefetch_factor=2 if nw > 0 else None,
         worker_init_fn=_worker_init,
     )
 
