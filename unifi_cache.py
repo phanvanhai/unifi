@@ -77,32 +77,53 @@ def _same_prep(a, b):
     return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
 
-def find_cache(sample_ids, prep, search_dirs, max_depth=4):
+def _iter_meta(root, max_depth):
+    """Mọi meta.json dưới root (≤ max_depth cấp), không đi vào thư mục chứa .dat."""
+    root = Path(root)
+    base = len(root.parts)
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        if 'meta.json' in filenames:
+            yield Path(dirpath) / 'meta.json'
+        if len(Path(dirpath).parts) - base >= max_depth or any(f.endswith('.dat') for f in filenames):
+            dirnames[:] = []
+
+
+def find_cache(sample_ids, prep, search_dirs, max_depth=8):
     """
     Tìm cache đã build xong trong `search_dirs` (vd. Kaggle Dataset gắn ở
-    /kaggle/input) có cùng tham số tiền xử lý và chứa ĐỦ các mẫu cần dùng
-    (được phép nhiều hơn → train trên tập con user/split vẫn dùng chung).
-    Trả về thư mục cache hoặc None.
+    /kaggle/input/datasets/<owner>/<slug>/...) có cùng tham số tiền xử lý và
+    chứa ĐỦ các mẫu cần dùng (được phép nhiều hơn). Trả về thư mục hoặc None.
     """
     need = set(sample_ids)
     for d in search_dirs:
-        d = Path(d)
-        if not d.is_dir():
+        if not Path(d).is_dir():
             continue
-        for depth in range(0, max_depth + 1):
-            for meta_p in d.glob('/'.join(['*'] * depth + ['meta.json'])):
-                root = meta_p.parent
-                if not ((root / 'DONE').exists() and (root / 'data.bin').exists()
-                        and (root / 'index.npy').exists()):
-                    continue
-                try:
-                    meta = json.loads(meta_p.read_text(encoding='utf-8'))
-                except (OSError, ValueError):
-                    continue
-                if meta.get('version') != CACHE_VERSION or not _same_prep(meta.get('prep'), prep):
-                    continue
-                if need.issubset(meta.get('ids', ())):
-                    return root
+        for meta_p in _iter_meta(d, max_depth):
+            root = meta_p.parent
+            try:
+                meta = json.loads(meta_p.read_text(encoding='utf-8'))
+            except (OSError, ValueError) as e:
+                log.info(f"[cache] Bỏ qua {root}: không đọc được meta.json ({e})")
+                continue
+            if 'ids' not in meta or 'prep' not in meta:
+                continue   # meta.json của thứ khác
+            why = None
+            if not ((root / 'data.bin').exists() and (root / 'index.npy').exists()):
+                why = 'thiếu data.bin/index.npy'
+            elif meta.get('bytes') is not None and (root / 'data.bin').stat().st_size != meta['bytes']:
+                why = 'data.bin không đủ kích thước (build dở / upload lỗi)'
+            elif meta.get('version') != CACHE_VERSION:
+                why = f"version {meta.get('version')} != {CACHE_VERSION}"
+            elif not _same_prep(meta.get('prep'), prep):
+                why = f"khác tham số tiền xử lý: {meta.get('prep')} vs {prep}"
+            else:
+                miss = need.difference(meta['ids'])
+                if miss:
+                    why = f"thiếu {len(miss)}/{len(need)} mẫu, vd. {sorted(miss)[:3]}"
+            if why:
+                log.info(f"[cache] Bỏ qua {root}: {why}")
+                continue
+            return root
     return None
 
 
