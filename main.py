@@ -162,16 +162,18 @@ SSHAR_SUBJECTS = ['subject_01', 'subject_02', 'subject_03', 'subject_04', 'subje
                   'subject_10', 'subject_11', 'subject_12', 'subject_13', 'subject_14']
 SSHAR_ACTS     = [1, 2, 3, 4, 5, 6, 7, 8]
 SSHAR_EXPECTED = {'train': 4480, 'val': 640, 'test': 1280}   # đủ 10 người x 8 hành động (cả 2 kiểu chia)
-# Cross-user (--split user --user-case N): train+val = USER_CASES["sshar"][N] của
-# CodeForPaper/benchmark/datasets.py (8 người), val = người cuối của list đó, test = 2 người còn lại.
+# Cross-user (--split user --user_case N), kaggle_run_convention.md mục 4: train+val = USER_CASES["sshar"][N]
+# của CodeForPaper/benchmark/datasets.py (8 người), test = 2 người còn lại. Val: case 0 = người cuối (12);
+# case 1..4 chọn bằng random.Random(42), lần lượt, không trùng val của các case trước.
 SSHAR_USER_CASES = [   # (train, val, test) theo số subject
-    ([1, 2, 3, 4, 9, 10, 11],  [12], [13, 14]),
-    ([1, 3, 4, 9, 11, 12, 13], [14], [2, 10]),
-    ([1, 2, 4, 9, 10, 12, 13], [14], [3, 11]),
-    ([2, 3, 4, 10, 11, 12, 13], [14], [1, 9]),
-    ([1, 2, 4, 9, 10, 11, 13], [14], [3, 12]),
+    ([1, 2, 3, 4, 9, 10, 11],    [12], [13, 14]),
+    ([1, 3, 4, 9, 11, 12, 14],   [13], [2, 10]),
+    ([2, 4, 9, 10, 12, 13, 14],  [1],  [3, 11]),
+    ([3, 4, 10, 11, 12, 13, 14], [2],  [1, 9]),
+    ([1, 2, 4, 9, 11, 13, 14],   [10], [3, 12]),
 ]
 USER_CASE      = 0
+MODEL_NAME     = 'UniFi'   # thư mục results/<RUN>/<MODEL_NAME>/
 SSHAR_PATTERN  = re.compile(r'act(\d+)_pos(\d+)_dir(\d+)_rep(\d+)')
 
 
@@ -232,6 +234,7 @@ TIME_LIMIT_H = 11.5 if IS_KAGGLE else None   # Kaggle cắt phiên ở 12 giờ
 PATIENCE     = 10
 LOG_INTERVAL = 20         # in tiến độ mỗi N batch (0 = tắt)
 RUN_NAME     = None       # tên thư mục run (None → <thời gian>_<kiểu chia>)
+RUN_DIR      = None       # đặt sẵn thư mục run (chế độ --results_dir), bỏ qua OUTPUT_DIR/runs/RUN_NAME
 MAKE_PLOTS   = True       # vẽ hình (plot_logs.py) khi train xong
 ZIP_RUN      = IS_KAGGLE  # nén thư mục run thành .zip để tải về 1 lần
 
@@ -743,7 +746,8 @@ def main():
     split_tag = SPLIT_BY if not TEST_VALUES else f"{SPLIT_BY}-{'_'.join(map(str, TEST_VALUES))}"
     if DATASET == 'sshar':
         split_tag = f"sshar-{SSHAR_DEVICE}_" + (f"user{USER_CASE}" if SPLIT_BY == 'user' else 'repeat')
-    run_dir   = Path(OUTPUT_DIR) / 'runs' / (RUN_NAME or f"{datetime.now():%Y%m%d_%H%M%S}_{split_tag}")
+    run_dir   = Path(RUN_DIR) if RUN_DIR else \
+        Path(OUTPUT_DIR) / 'runs' / (RUN_NAME or f"{datetime.now():%Y%m%d_%H%M%S}_{split_tag}")
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(run_dir)
     t_main = time.time()
@@ -785,9 +789,15 @@ def main():
             if got != SSHAR_EXPECTED:
                 raise RuntimeError(f"Số mẫu {got} != protocol {SSHAR_EXPECTED}")
             log.info(f"Số mẫu khớp protocol: {got}")
-        if DATASET == 'sshar' and SPLIT_BY == 'user':
-            log.info("Cross-user case %d: " % USER_CASE + ' | '.join(
-                f"{n} {sorted({s['user'] for s in ss})}" for n, ss in sets.items()))
+        if DATASET == 'sshar':
+            if SPLIT_BY == 'user':
+                us = {n: ', '.join(sorted({s['user'].split('_')[1] for s in ss})) for n, ss in sets.items()}
+                log.info(f"👥 Split user case {USER_CASE} | test: {us['test']} | train: {us['train']} "
+                         f"| val: {us['val']}")
+            else:
+                log.info("👥 Split repeat (theo lần lặp, SSHAR_ESP_protocol.md mục 3)")
+            sizes = {n: len(ss) for n, ss in sets.items()}
+            log.info(f"📦 sizes: {sizes} | seed {SEED} | patience {PATIENCE}")
 
         Mask = build_spatial_mask(V, RX_DIRECTIONS) if RX_DIRECTIONS is not None else None
         if Mask is not None:
@@ -900,10 +910,14 @@ def parse_args(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     g = p.add_argument_group('dữ liệu / đường dẫn')
     g.add_argument('--dataset', choices=['widar', 'sshar'], default=DATASET)
-    g.add_argument('--data-root', default=None,
+    g.add_argument('--data-root', '--data_path', dest='data_root', default=None,
                    help='widar/ chứa userX/*.dat, hoặc sshar_amp_interp/ chứa room_XX (mặc định: tự tìm)')
     g.add_argument('--output-dir', default=str(OUTPUT_DIR), help='nơi tạo runs/<tên run>/')
-    g.add_argument('--run-name', default=RUN_NAME, help='tên thư mục run (mặc định: thời gian + kiểu chia)')
+    g.add_argument('--run-name', '--run_name', dest='run_name', default=RUN_NAME,
+                   help='tên thư mục run (mặc định: thời gian + kiểu chia)')
+    g.add_argument('--results_dir', '--results-dir', dest='results_dir', default=None,
+                   help='SSHAR, theo kaggle_run_convention.md: ghi results_dir/<run_name>/UniFi/seed_<s>/ '
+                        'cho từng seed trong --seeds, kèm summary.txt / summary.csv / per_seed.csv')
     g.add_argument('--users', nargs='+', default=None,
                    help='Widar: user5 ... | SSHAR: subject_01 ... (mặc định: tất cả)')
     g.add_argument('--gestures', nargs='+', type=int, default=None,
@@ -912,9 +926,9 @@ def parse_args(argv=None):
 
     g = p.add_argument_group('chia train/test')
     g.add_argument('--split', choices=['random', 'user', 'location', 'orientation', 'protocol', 'repeat'],
-                   default=None, help='mặc định: random (Widar), repeat = protocol (SSHAR). '
-                                      'SSHAR: repeat | user (kèm --user-case)')
-    g.add_argument('--user-case', type=int, default=USER_CASE, choices=range(len(SSHAR_USER_CASES)),
+                   default=None, help='mặc định: random (Widar), user (SSHAR). '
+                                      'SSHAR: user (kèm --user_case) | repeat (= protocol)')
+    g.add_argument('--user-case', '--user_case', dest='user_case', type=int, default=USER_CASE, choices=range(len(SSHAR_USER_CASES)),
                    help='SSHAR --split user: case 0..4 (train/val/test theo người, xem SSHAR_USER_CASES)')
     g.add_argument('--test-values', nargs='*', type=_int_or_str, default=TEST_VALUES,
                    help="ví dụ: --split location --test-values 3 ; --split user --test-values user5")
@@ -923,10 +937,12 @@ def parse_args(argv=None):
                    help='Widar: tỉ lệ val tách từ phần train (mỗi lớp); 0 = không val, chọn theo test. '
                         'SSHAR: bỏ qua (val theo protocol)')
     g.add_argument('--seed', type=int, default=SEED)
+    g.add_argument('--seeds', nargs='+', type=int, default=None,
+                   help='nhiều seed, chạy lần lượt (dùng với --results_dir)')
 
     g = p.add_argument_group('huấn luyện')
     g.add_argument('--epochs', type=int, default=NUM_EPOCHS)
-    g.add_argument('--batch-size', type=int, default=BATCH_SIZE)
+    g.add_argument('--batch-size', '--batch_size', dest='batch_size', type=int, default=BATCH_SIZE)
     g.add_argument('--lr', type=float, default=LR)
     g.add_argument('--beta1', type=float, default=BETA1)
     g.add_argument('--beta2', type=float, default=BETA2)
@@ -978,7 +994,7 @@ def apply_args(a):
         V             = len(SSHAR_RX)
         RX_POS        = None
         RX_DIRECTIONS = None
-        SPLIT_BY      = {'repeat': 'protocol', None: 'protocol'}.get(a.split, a.split)
+        SPLIT_BY      = {'repeat': 'protocol', None: 'user'}.get(a.split, a.split)
         USER_CASE     = a.user_case
         if SPLIT_BY not in ('protocol', 'user'):
             raise SystemExit("SSHAR: --split repeat hoặc --split user")
@@ -1025,6 +1041,48 @@ def apply_args(a):
 
 # Bắt buộc trên Windows khi num_workers > 0:
 # worker process import lại main.py, không được chạy train lần nữa
+def run_convention(a):
+    """kaggle_run_convention.md: mỗi seed 1 lần main() vào results/<RUN>/<MODEL>/seed_<s>/, rồi tổng hợp."""
+    global SEED, RUN_DIR, ZIP_RUN
+    import gc
+    import sshar_results
+    seeds    = a.seeds or [SEED]
+    run_name = a.run_name or (f"SSHAR_ESP_{MODEL_NAME}_"
+                              + (f"user{USER_CASE}" if SPLIT_BY == 'user' else 'repeat')
+                              + f"_p{PATIENCE}_seed{'-'.join(map(str, seeds))}")
+    run_root = Path(a.results_dir) / run_name
+    ZIP_RUN  = False                 # notebook tự nén cả results/<RUN>
+    rows = []
+    for seed in seeds:
+        SEED    = seed
+        RUN_DIR = run_root / MODEL_NAME / f'seed_{seed}'
+        main()
+        rows.append(sshar_results.export_seed(RUN_DIR, seed))
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    groups = dict(zip(('train', 'val', 'test'), SSHAR_USER_CASES[USER_CASE])) if SPLIT_BY == 'user' else None
+    cfg = {'split': 'user' if SPLIT_BY == 'user' else 'repeat',
+           'user_case': USER_CASE if SPLIT_BY == 'user' else None,
+           'users': ({k: [f'{u:02d}' for u in v] for k, v in groups.items()} if groups
+                     else 'tất cả (chia theo lần lặp)'),
+           'patience': PATIENCE, 'seeds': [r['seed'] for r in rows],
+           'batch_size': BATCH_SIZE, 'epochs': NUM_EPOCHS, 'lr': LR, 'beta1': BETA1, 'beta2': BETA2,
+           'checkpoint': 'val accuracy cao nhất', 'report': 'test (+ val cùng checkpoint)',
+           'data_path': str(DATA_ROOT)}
+    txt = sshar_results.write_run_summary(run_root, MODEL_NAME, rows, cfg)
+    print('\n' + txt)
+    print(f"Kết quả: {run_root}")
+
+
 if __name__ == '__main__':
-    apply_args(parse_args())
-    main()
+    _a = parse_args()
+    apply_args(_a)
+    if _a.results_dir:
+        if DATASET != 'sshar':
+            raise SystemExit('--results_dir chỉ dùng với --dataset sshar')
+        run_convention(_a)
+    else:
+        if _a.seeds:
+            raise SystemExit('--seeds cần --results_dir')
+        main()

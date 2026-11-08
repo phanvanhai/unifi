@@ -61,24 +61,25 @@ Code tự tìm `sshar_amp_interp` trong `/kaggle/input`, ở `../../CodeForPaper
 
 Siêu tham số giữ theo bài UniFi: batch 32, tối đa 100 epoch, Adam, lr 0.005, β1 = 1.0, β2 = 0.05; không scheduler / augmentation. Thiết lập riêng của mô hình (protocol mục 4, cần ghi vào báo cáo): **early stopping patience 10 theo val accuracy** (`--patience`, `0` = tắt), chạy 1 GPU. Ảnh min-max trên từng mẫu (như bài), không dùng thống kê toàn tập.
 
-Chạy (train, chọn checkpoint theo val, rồi đánh giá checkpoint đó trên val và test):
+Chạy theo [kaggle_run_convention.md](kaggle_run_convention.md) (train, chọn checkpoint theo val, báo cáo trên test kèm val của cùng checkpoint; không có chế độ dev):
 
 ```bash
-python main.py --dataset sshar                                  # chia theo lần lặp (protocol mục 3)
-python main.py --dataset sshar --split user --user-case 0      # cross-user, case 0..4
+python main.py --dataset sshar --split user --user_case 0 --patience 10 --seeds 42 \
+    --data_path <thư mục chứa room_02> --results_dir results --run_name SSHAR_ESP_UniFi_user0_p10_seed42
+python main.py --dataset sshar --split repeat ...      # chia theo lần lặp (protocol mục 3)
 ```
 
-Cross-user (train / val / test theo số subject; train+val = `USER_CASES["sshar"]` của benchmark, val = người cuối):
+Mặc định `--split user --user_case 0`. Năm case cross-user (kaggle_run_convention.md mục 4; train+val = `USER_CASES["sshar"]` của benchmark; val: case 0 là người 12, case 1–4 chọn ngẫu nhiên `random.Random(42)`, không trùng nhau):
 
 | Case | Train | Val | Test |
 |---|---|---|---|
 | 0 | 01 02 03 04 09 10 11 | 12 | 13 14 |
-| 1 | 01 03 04 09 11 12 13 | 14 | 02 10 |
-| 2 | 01 02 04 09 10 12 13 | 14 | 03 11 |
-| 3 | 02 03 04 10 11 12 13 | 14 | 01 09 |
-| 4 | 01 02 04 09 10 11 13 | 14 | 03 12 |
+| 1 | 01 03 04 09 11 12 14 | 13 | 02 10 |
+| 2 | 02 04 09 10 12 13 14 | 01 | 03 11 |
+| 3 | 03 04 10 11 12 13 14 | 02 | 01 09 |
+| 4 | 01 02 04 09 11 13 14 | 10 | 03 12 |
 
-Kết quả nằm ở `summary.json`: `best_val` (accuracy, macro P/R/F1 tại epoch tốt nhất) và `final.val`, `final.test` (checkpoint tốt nhất); dự đoán từng mẫu ở `val_predictions_best.csv`, `test_predictions_final.csv`. Cache tiền xử lý SSHAR nhỏ (~2.7 GB) và build nhanh nên không cần tạo Kaggle Dataset cho cache.
+Kết quả ở `results/<RUN>/`: `summary.txt`, `summary.csv`, `config.json`, `UniFi/per_seed.csv`, và mỗi seed `UniFi/seed_<s>/` có `metrics.json`, `history.csv`, `curve.png`, `cm.png`, `cm_normalized.png`, `confusion_matrix.csv`, `per_class_metrics.csv`, `predictions.csv` (trên **test**), thư mục `val/` cùng các file đó trên val, cùng file gốc của code (`train.log`, `summary.json`, `best_model.pth`, `plots/`). Cache tiền xử lý SSHAR nhỏ (~2.7 GB) và build nhanh nên không cần tạo Kaggle Dataset cho cache.
 
 ---
 
@@ -177,7 +178,7 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 | `--data-root` | `DATA_ROOT` | Thư mục chứa `userX/*.dat` (Widar) hoặc `room_XX/` (SSHAR); mặc định tự tìm |
 | `--output-dir` | `OUTPUT_DIR` | Nơi tạo `runs/` (Kaggle: `/kaggle/working`) |
 | `--users`, `--gestures` | `USERS`, `GESTURES` | User và gesture id được dùng (nhãn = vị trí trong list) |
-| `--split`, `--test-values`, `--test-ratio` | `SPLIT_BY`, `TEST_VALUES`, `TEST_RATIO` | Widar: `random` (in-domain, 20% test) / `user` / `location` / `orientation`; SSHAR: `protocol` |
+| `--split`, `--test-values`, `--test-ratio` | `SPLIT_BY`, `TEST_VALUES`, `TEST_RATIO` | Widar: `random` (in-domain, 20% test) / `user` / `location` / `orientation`; SSHAR: `user` (mặc định, kèm `--user_case 0..4`) hoặc `repeat` |
 | `--val-ratio` | `VAL_RATIO` | Widar: tỉ lệ val tách từ phần train, mỗi lớp (mặc định 0.1; `0` = không val, chọn checkpoint theo test). SSHAR: val theo protocol |
 | `--epochs`, `--batch-size`, `--lr`, `--beta1`, `--beta2` | | Theo bài báo: 100*, 32, 0.005, 1.0, 0.05 (*bài không nêu số epoch) |
 | `--weight-decay`, `--grad-clip` | | Không có trong bài, mặc định tắt |

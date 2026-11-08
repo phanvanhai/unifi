@@ -128,14 +128,9 @@ nguyên**, tập val được tách ra từ tập train cũ.
 | Metric | accuracy, precision, recall, F1 (precision/recall/F1 lấy trung bình **macro** trên 8 lớp) |
 | Seed | hiện chỉ dùng 42 để đánh giá nhanh, sau này có thể thêm seed |
 
-Hai giai đoạn:
-
-1. **Development:** train trên train, chọn checkpoint theo val, **báo cáo trên val**. Mọi so sánh
-   và mọi quyết định điều chỉnh đều dựa vào giai đoạn này, không nhìn vào test. Hiện chạy seed 42.
-   Khi có thêm seed thì báo cáo mean ± std qua các seed.
-2. **Final test:** chạy một lần duy nhất ở bước cuối, seed 42. Train như cũ, rồi đánh giá checkpoint
-   (chọn theo val) trên **test**; cùng checkpoint đó cũng được đo trên val để đối chiếu, tất cả trong
-   một lần chạy. Sau khi xem kết quả test thì không điều chỉnh gì thêm.
+Mỗi lần chạy: train trên train, chọn checkpoint theo val (val chỉ dùng để chọn checkpoint và dừng
+sớm), rồi đánh giá checkpoint đó trên **test** (kết quả báo cáo); cùng checkpoint cũng được đo trên val
+để đối chiếu, tất cả trong một lần chạy. Khi có nhiều seed thì báo cáo mean ± std qua các seed.
 
 Những mục thuộc về từng mô hình (ghi rõ trong báo cáo của mô hình đó, không phải thiết lập chung):
 early stopping, LR scheduler, augmentation, class weights, chuẩn hoá input và cách reshape input.
@@ -150,5 +145,5 @@ std 0.02, min-max theo min/max toàn cục của tập train, và giữ đủ T 
 - [ ] Thống kê chuẩn hoá (nếu có) chỉ tính trên **train**
 - [ ] Batch 32, tối đa 100 epoch, Adam, LR theo bài gốc
 - [ ] Chọn checkpoint theo val accuracy cao nhất
-- [ ] Kết quả development báo cáo trên val (seed 42); test chỉ đánh giá một lần (seed 42)
+- [ ] Báo cáo trên test bằng checkpoint chọn theo val (kèm kết quả val của cùng checkpoint)
 - [ ] Báo cáo accuracy và precision / recall / F1 (macro)
