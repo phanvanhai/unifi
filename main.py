@@ -162,7 +162,6 @@ SSHAR_SUBJECTS = ['subject_01', 'subject_02', 'subject_03', 'subject_04', 'subje
                   'subject_10', 'subject_11', 'subject_12', 'subject_13', 'subject_14']
 SSHAR_ACTS     = [1, 2, 3, 4, 5, 6, 7, 8]
 SSHAR_EXPECTED = {'train': 4480, 'val': 640, 'test': 1280}   # đủ 10 người x 8 hành động
-FINAL_TEST     = False    # True: đánh giá thêm trên test (1 lần duy nhất, bước cuối)
 SSHAR_PATTERN  = re.compile(r'act(\d+)_pos(\d+)_dir(\d+)_rep(\d+)')
 
 
@@ -663,7 +662,6 @@ def config_dict():
         'V'           : V,
         'dataset'     : DATASET,
         'split_by'    : SPLIT_BY,
-        'final_test'  : FINAL_TEST,
         'test_values' : TEST_VALUES,
         'test_ratio'  : TEST_RATIO,
         'val_ratio'   : VAL_RATIO,
@@ -729,7 +727,7 @@ def main():
     # Mỗi lần chạy 1 thư mục riêng: <OUTPUT_DIR>/runs/<thời gian>_<split>
     split_tag = SPLIT_BY if not TEST_VALUES else f"{SPLIT_BY}-{'_'.join(map(str, TEST_VALUES))}"
     if DATASET == 'sshar':
-        split_tag = f"sshar-{SSHAR_DEVICE}_{'final' if FINAL_TEST else 'dev'}"
+        split_tag = f"sshar-{SSHAR_DEVICE}"
     run_dir   = Path(OUTPUT_DIR) / 'runs' / (RUN_NAME or f"{datetime.now():%Y%m%d_%H%M%S}_{split_tag}")
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(run_dir)
@@ -803,16 +801,11 @@ def main():
         train_loader = make_loader(sets['train'], shuffle=True, device=device, cache_root=cache_root)
         eval_loader  = make_loader(sets[eval_name], shuffle=False, device=device, cache_root=cache_root)
         final_eval = None
-        if eval_name == 'val' and (DATASET != 'sshar' or FINAL_TEST):
+        if eval_name == 'val':
             test_loader = make_loader(sets['test'], shuffle=False, device=device, cache_root=cache_root)
             final_eval  = [('val',  eval_loader, [sample_meta(s) for s in sets['val']]),
                            ('test', test_loader, [sample_meta(s) for s in sets['test']])]
-        if DATASET == 'sshar' and FINAL_TEST:
-            log.warning("FINAL TEST: sau khi train sẽ đánh giá checkpoint tốt nhất (theo val) trên test "
-                        "— chỉ chạy 1 lần ở bước cuối, không điều chỉnh gì sau khi xem kết quả")
-        elif DATASET == 'sshar':
-            log.info("Development: chọn checkpoint và báo cáo trên val, không đụng tới test")
-        elif eval_name == 'val':
+        if eval_name == 'val':
             log.info("Chọn checkpoint theo val acc; test chỉ đánh giá 1 lần bằng checkpoint đó sau khi train")
         else:
             log.warning("--val-ratio 0: chọn checkpoint theo TEST acc (kết quả lạc quan)")
@@ -843,7 +836,7 @@ def main():
                        log_interval=LOG_INTERVAL, patience=PATIENCE,
                        extra_summary={'run_dir': str(run_dir), 'dataset': DATASET,
                                       'split_by': SPLIT_BY, 'test_values': TEST_VALUES,
-                                      'val_ratio': VAL_RATIO, 'final_test': FINAL_TEST,
+                                      'val_ratio': VAL_RATIO,
                                       **{f'n_{n}': len(ss) for n, ss in sets.items()},
                                       'git_commit': env.get('git_commit')})
 
@@ -902,8 +895,6 @@ def parse_args(argv=None):
     g = p.add_argument_group('chia train/test')
     g.add_argument('--split', choices=['random', 'user', 'location', 'orientation', 'protocol'],
                    default=None, help='mặc định: random (Widar), protocol (SSHAR)')
-    g.add_argument('--final-test', action='store_true',
-                   help='SSHAR: đánh giá checkpoint tốt nhất (theo val) trên test — chỉ ở bước cuối')
     g.add_argument('--test-values', nargs='*', type=_int_or_str, default=TEST_VALUES,
                    help="ví dụ: --split location --test-values 3 ; --split user --test-values user5")
     g.add_argument('--test-ratio', type=float, default=TEST_RATIO)
@@ -956,9 +947,8 @@ def apply_args(a):
     global TEST_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
     global RX_DIRECTIONS, DFS_HIGHPASS, NUM_WORKERS, AMP, MULTI_GPU, USE_CACHE, CACHE_DIR
     global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY, PATIENCE
-    global DATASET, FINAL_TEST, GESTURE_NAMES, V, RX_POS, VAL_RATIO
+    global DATASET, GESTURE_NAMES, V, RX_POS, VAL_RATIO
     DATASET      = a.dataset
-    FINAL_TEST   = a.final_test
     if DATASET == 'sshar':
         DATA_ROOT     = Path(a.data_root) if a.data_root else find_sshar_root()
         USERS         = a.users or list(SSHAR_SUBJECTS)
@@ -969,8 +959,6 @@ def apply_args(a):
         RX_DIRECTIONS = None
         SPLIT_BY      = a.split or 'protocol'
     else:
-        if a.final_test:
-            raise SystemExit('--final-test chỉ dùng với --dataset sshar')
         DATA_ROOT = Path(a.data_root) if a.data_root else find_data_root()
         USERS     = a.users or USERS
         GESTURES  = a.gestures or GESTURES

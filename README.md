@@ -61,14 +61,13 @@ Code tự tìm `sshar_amp_interp` trong `/kaggle/input`, ở `../../CodeForPaper
 
 Siêu tham số giữ theo bài UniFi: batch 32, tối đa 100 epoch, Adam, lr 0.005, β1 = 1.0, β2 = 0.05; không scheduler / augmentation. Thiết lập riêng của mô hình (protocol mục 4, cần ghi vào báo cáo): **early stopping patience 10 theo val accuracy** (`--patience`, `0` = tắt), chạy 1 GPU. Ảnh min-max trên từng mẫu (như bài), không dùng thống kê toàn tập.
 
-Hai giai đoạn của protocol:
+Chạy (train, chọn checkpoint theo val, rồi đánh giá checkpoint đó trên val và test):
 
 ```bash
-python main.py --dataset sshar                 # Development: train, chọn + báo cáo trên val, không đụng test
-python main.py --dataset sshar --final-test    # Final (1 lần, bước cuối): thêm đánh giá checkpoint tốt nhất trên val và test
+python main.py --dataset sshar
 ```
 
-Kết quả nằm ở `summary.json`: `best_val` (accuracy, macro P/R/F1 tại epoch tốt nhất) và với `--final-test` thêm `final.val`, `final.test`; dự đoán từng mẫu ở `val_predictions_best.csv`, `test_predictions_final.csv`. Cache tiền xử lý SSHAR nhỏ (~2.7 GB) và build nhanh nên không cần tạo Kaggle Dataset cho cache.
+Kết quả nằm ở `summary.json`: `best_val` (accuracy, macro P/R/F1 tại epoch tốt nhất) và `final.val`, `final.test` (checkpoint tốt nhất); dự đoán từng mẫu ở `val_predictions_best.csv`, `test_predictions_final.csv`. Cache tiền xử lý SSHAR nhỏ (~2.7 GB) và build nhanh nên không cần tạo Kaggle Dataset cho cache.
 
 ---
 
@@ -165,7 +164,6 @@ Mọi biến ở đầu `main.py` đều ghi đè được bằng tham số dòn
 |---|---|---|
 | `--dataset` | `DATASET` | `widar` (mặc định) hoặc `sshar` (mục 2b) |
 | `--data-root` | `DATA_ROOT` | Thư mục chứa `userX/*.dat` (Widar) hoặc `room_XX/` (SSHAR); mặc định tự tìm |
-| `--final-test` | `FINAL_TEST` | SSHAR: đánh giá checkpoint tốt nhất (theo val) trên test, chỉ ở bước cuối |
 | `--output-dir` | `OUTPUT_DIR` | Nơi tạo `runs/` (Kaggle: `/kaggle/working`) |
 | `--users`, `--gestures` | `USERS`, `GESTURES` | User và gesture id được dùng (nhãn = vị trí trong list) |
 | `--split`, `--test-values`, `--test-ratio` | `SPLIT_BY`, `TEST_VALUES`, `TEST_RATIO` | Widar: `random` (in-domain, 20% test) / `user` / `location` / `orientation`; SSHAR: `protocol` |
