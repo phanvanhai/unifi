@@ -64,8 +64,19 @@ Siêu tham số giữ theo bài UniFi: batch 32, tối đa 100 epoch, Adam, lr 0
 Chạy (train, chọn checkpoint theo val, rồi đánh giá checkpoint đó trên val và test):
 
 ```bash
-python main.py --dataset sshar
+python main.py --dataset sshar                                  # chia theo lần lặp (protocol mục 3)
+python main.py --dataset sshar --split user --user-case 0      # cross-user, case 0..4
 ```
+
+Cross-user (train / val / test theo số subject; train+val = `USER_CASES["sshar"]` của benchmark, val = người cuối):
+
+| Case | Train | Val | Test |
+|---|---|---|---|
+| 0 | 01 02 03 04 09 10 11 | 12 | 13 14 |
+| 1 | 01 03 04 09 11 12 13 | 14 | 02 10 |
+| 2 | 01 02 04 09 10 12 13 | 14 | 03 11 |
+| 3 | 02 03 04 10 11 12 13 | 14 | 01 09 |
+| 4 | 01 02 04 09 10 11 13 | 14 | 03 12 |
 
 Kết quả nằm ở `summary.json`: `best_val` (accuracy, macro P/R/F1 tại epoch tốt nhất) và `final.val`, `final.test` (checkpoint tốt nhất); dự đoán từng mẫu ở `val_predictions_best.csv`, `test_predictions_final.csv`. Cache tiền xử lý SSHAR nhỏ (~2.7 GB) và build nhanh nên không cần tạo Kaggle Dataset cho cache.
 

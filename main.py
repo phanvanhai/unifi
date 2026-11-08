@@ -161,7 +161,17 @@ SSHAR_RX       = ['rx_00', 'rx_01', 'rx_02']
 SSHAR_SUBJECTS = ['subject_01', 'subject_02', 'subject_03', 'subject_04', 'subject_09',
                   'subject_10', 'subject_11', 'subject_12', 'subject_13', 'subject_14']
 SSHAR_ACTS     = [1, 2, 3, 4, 5, 6, 7, 8]
-SSHAR_EXPECTED = {'train': 4480, 'val': 640, 'test': 1280}   # đủ 10 người x 8 hành động
+SSHAR_EXPECTED = {'train': 4480, 'val': 640, 'test': 1280}   # đủ 10 người x 8 hành động (cả 2 kiểu chia)
+# Cross-user (--split user --user-case N): train+val = USER_CASES["sshar"][N] của
+# CodeForPaper/benchmark/datasets.py (8 người), val = người cuối của list đó, test = 2 người còn lại.
+SSHAR_USER_CASES = [   # (train, val, test) theo số subject
+    ([1, 2, 3, 4, 9, 10, 11],  [12], [13, 14]),
+    ([1, 3, 4, 9, 11, 12, 13], [14], [2, 10]),
+    ([1, 2, 4, 9, 10, 12, 13], [14], [3, 11]),
+    ([2, 3, 4, 10, 11, 12, 13], [14], [1, 9]),
+    ([1, 2, 4, 9, 10, 11, 13], [14], [3, 12]),
+]
+USER_CASE      = 0
 SSHAR_PATTERN  = re.compile(r'act(\d+)_pos(\d+)_dir(\d+)_rep(\d+)')
 
 
@@ -473,9 +483,13 @@ def subsample(samples, n, seed):
 def split_samples(samples):
     """dict tên tập → list mẫu: SSHAR và Widar {'train','val','test'} (Widar --val-ratio 0: {'train','test'})."""
     if DATASET == 'sshar':
-        if SPLIT_BY != 'protocol':
-            raise ValueError("SSHAR chỉ dùng --split protocol (SSHAR_ESP_protocol.md)")
-        return {k: [s for s in samples if s['split'] == k] for k in ('train', 'val', 'test')}
+        if SPLIT_BY == 'protocol':      # theo lần lặp (SSHAR_ESP_protocol.md mục 3)
+            return {k: [s for s in samples if s['split'] == k] for k in ('train', 'val', 'test')}
+        if SPLIT_BY == 'user':          # cross-user
+            groups = dict(zip(('train', 'val', 'test'), SSHAR_USER_CASES[USER_CASE]))
+            return {k: [s for s in samples if int(s['user'].split('_')[1]) in g]
+                    for k, g in groups.items()}
+        raise ValueError("SSHAR: --split repeat (= protocol) hoặc --split user --user-case N")
     train_s, test_s = _split_widar(samples)
     if VAL_RATIO <= 0:
         return {'train': train_s, 'test': test_s}
@@ -662,6 +676,7 @@ def config_dict():
         'V'           : V,
         'dataset'     : DATASET,
         'split_by'    : SPLIT_BY,
+        'user_case'   : USER_CASE if DATASET == 'sshar' and SPLIT_BY == 'user' else None,
         'test_values' : TEST_VALUES,
         'test_ratio'  : TEST_RATIO,
         'val_ratio'   : VAL_RATIO,
@@ -727,7 +742,7 @@ def main():
     # Mỗi lần chạy 1 thư mục riêng: <OUTPUT_DIR>/runs/<thời gian>_<split>
     split_tag = SPLIT_BY if not TEST_VALUES else f"{SPLIT_BY}-{'_'.join(map(str, TEST_VALUES))}"
     if DATASET == 'sshar':
-        split_tag = f"sshar-{SSHAR_DEVICE}"
+        split_tag = f"sshar-{SSHAR_DEVICE}_" + (f"user{USER_CASE}" if SPLIT_BY == 'user' else 'repeat')
     run_dir   = Path(OUTPUT_DIR) / 'runs' / (RUN_NAME or f"{datetime.now():%Y%m%d_%H%M%S}_{split_tag}")
     run_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(run_dir)
@@ -770,6 +785,9 @@ def main():
             if got != SSHAR_EXPECTED:
                 raise RuntimeError(f"Số mẫu {got} != protocol {SSHAR_EXPECTED}")
             log.info(f"Số mẫu khớp protocol: {got}")
+        if DATASET == 'sshar' and SPLIT_BY == 'user':
+            log.info("Cross-user case %d: " % USER_CASE + ' | '.join(
+                f"{n} {sorted({s['user'] for s in ss})}" for n, ss in sets.items()))
 
         Mask = build_spatial_mask(V, RX_DIRECTIONS) if RX_DIRECTIONS is not None else None
         if Mask is not None:
@@ -893,8 +911,11 @@ def parse_args(argv=None):
     g.add_argument('--max-samples', type=int, default=MAX_SAMPLES, help='dùng ít mẫu để chạy thử')
 
     g = p.add_argument_group('chia train/test')
-    g.add_argument('--split', choices=['random', 'user', 'location', 'orientation', 'protocol'],
-                   default=None, help='mặc định: random (Widar), protocol (SSHAR)')
+    g.add_argument('--split', choices=['random', 'user', 'location', 'orientation', 'protocol', 'repeat'],
+                   default=None, help='mặc định: random (Widar), repeat = protocol (SSHAR). '
+                                      'SSHAR: repeat | user (kèm --user-case)')
+    g.add_argument('--user-case', type=int, default=USER_CASE, choices=range(len(SSHAR_USER_CASES)),
+                   help='SSHAR --split user: case 0..4 (train/val/test theo người, xem SSHAR_USER_CASES)')
     g.add_argument('--test-values', nargs='*', type=_int_or_str, default=TEST_VALUES,
                    help="ví dụ: --split location --test-values 3 ; --split user --test-values user5")
     g.add_argument('--test-ratio', type=float, default=TEST_RATIO)
@@ -947,7 +968,7 @@ def apply_args(a):
     global TEST_RATIO, SEED, NUM_EPOCHS, BATCH_SIZE, LR, BETA1, BETA2, WEIGHT_DECAY, GRAD_CLIP
     global RX_DIRECTIONS, DFS_HIGHPASS, NUM_WORKERS, AMP, MULTI_GPU, USE_CACHE, CACHE_DIR
     global TIME_LIMIT_H, LOG_INTERVAL, MAKE_PLOTS, ZIP_RUN, CACHE_SEARCH, CACHE_ONLY, PIN_MEMORY, PATIENCE
-    global DATASET, GESTURE_NAMES, V, RX_POS, VAL_RATIO
+    global DATASET, GESTURE_NAMES, V, RX_POS, VAL_RATIO, USER_CASE
     DATASET      = a.dataset
     if DATASET == 'sshar':
         DATA_ROOT     = Path(a.data_root) if a.data_root else find_sshar_root()
@@ -957,7 +978,10 @@ def apply_args(a):
         V             = len(SSHAR_RX)
         RX_POS        = None
         RX_DIRECTIONS = None
-        SPLIT_BY      = a.split or 'protocol'
+        SPLIT_BY      = {'repeat': 'protocol', None: 'protocol'}.get(a.split, a.split)
+        USER_CASE     = a.user_case
+        if SPLIT_BY not in ('protocol', 'user'):
+            raise SystemExit("SSHAR: --split repeat hoặc --split user")
     else:
         DATA_ROOT = Path(a.data_root) if a.data_root else find_data_root()
         USERS     = a.users or USERS
