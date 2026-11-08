@@ -1052,6 +1052,9 @@ def run_convention(a):
                               + f"_p{PATIENCE}_seed{'-'.join(map(str, seeds))}")
     run_root = Path(a.results_dir) / run_name
     ZIP_RUN  = False                 # notebook tự nén cả results/<RUN>
+    if CACHE_ONLY:                   # chỉ build cache, không train / không ghi results
+        main()
+        return
     rows = []
     for seed in seeds:
         SEED    = seed

@@ -79,7 +79,13 @@ Mặc định `--split user --user_case 0`. Năm case cross-user (kaggle_run_con
 | 3 | 03 04 10 11 12 13 14 | 02 | 01 09 |
 | 4 | 01 02 04 09 11 13 14 | 10 | 03 12 |
 
-Kết quả ở `results/<RUN>/`: `summary.txt`, `summary.csv`, `config.json`, `UniFi/per_seed.csv`, và mỗi seed `UniFi/seed_<s>/` có `metrics.json`, `history.csv`, `curve.png`, `cm.png`, `cm_normalized.png`, `confusion_matrix.csv`, `per_class_metrics.csv`, `predictions.csv` (trên **test**), thư mục `val/` cùng các file đó trên val, cùng file gốc của code (`train.log`, `summary.json`, `best_model.pth`, `plots/`). Cache tiền xử lý SSHAR nhỏ (~2.7 GB) và build nhanh nên không cần tạo Kaggle Dataset cho cache.
+Kết quả ở `results/<RUN>/`: `summary.txt`, `summary.csv`, `config.json`, `UniFi/per_seed.csv`, và mỗi seed `UniFi/seed_<s>/` có `metrics.json`, `history.csv`, `curve.png`, `cm.png`, `cm_normalized.png`, `confusion_matrix.csv`, `per_class_metrics.csv`, `predictions.csv` (trên **test**), thư mục `val/` cùng các file đó trên val, cùng file gốc của code (`train.log`, `summary.json`, `best_model.pth`, `plots/`). Cache tiền xử lý SSHAR (~2.7 GB, 6400 mẫu) dùng chung cho mọi cách chia (`repeat` và 5 case `user`), nên chỉ cần build 1 lần rồi lưu thành Kaggle Dataset, giống Widar:
+
+```bash
+python main.py --dataset sshar --data_path <thư mục chứa room_02> --cache-only --cache-dir /kaggle/working/unifi_cache
+```
+
+Sau đó Add Input dataset cache đó cho notebook train; code tự tìm trong `/kaggle/input` (`[cache] Dùng cache có sẵn ...`).
 
 ---
 
